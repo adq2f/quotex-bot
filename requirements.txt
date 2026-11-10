@@ -1,0 +1,9 @@
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+mplfinance>=0.12.10b0
+flask>=3.0
+requests>=2.31
+python-dotenv>=1.0
+firebase-admin>=6.4
+# Quotex data/execution client (unofficial) - add your chosen package here later
