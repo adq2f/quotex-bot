@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+venv/
+.venv/
+.DS_Store
+charts_tmp/
