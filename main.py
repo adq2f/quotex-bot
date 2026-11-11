@@ -1,8 +1,17 @@
 """
 main.py  --  entry point (Section 10/11). Flask health server runs in the MAIN thread (so Render sees a web
 service and UptimeRobot can ping /health); the trading loop runs in a daemon thread.
+
+FIX LOG v2.3:
+  - Added sys.path fix at the top to resolve ModuleNotFoundError for 'bot' package on Render.
+  - Fixed app.run port binding to correctly use Render's dynamic PORT environment variable.
 """
+import sys
 import os
+
+# FIX: Force Python to look in the current directory so 'bot' package is found on Render
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import threading
 import time
 from collections import Counter
@@ -279,7 +288,10 @@ def main():
     bot = Bot()
     threading.Thread(target=bot.run_forever, daemon=True).start()
     app = create_app(bot)
-    app.run(host="0.0.0.0", port=settings.port)
+    
+    # FIX: Use Render's assigned PORT environment variable
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
