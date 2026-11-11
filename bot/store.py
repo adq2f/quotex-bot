@@ -2,6 +2,9 @@
 store.py  --  persistence (SQLite / Turso Cloud). Section 10: every decision + signal outcome is logged for audit/backtest.
 On Render Free tier (no persistent disk), set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN to persist data in Turso cloud.
 If those env vars are missing, it falls back to local SQLite (for local testing).
+
+FIX LOG v2.4:
+  - Switched from 'libsql-experimental' to the stable 'libsql' package to fix Render Python 3.14 build errors.
 """
 import json
 import os
@@ -12,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 # Try to import libsql for Turso Cloud
 try:
-    import libsql_experimental as libsql
+    import libsql
 except ImportError:
     libsql = None
 
