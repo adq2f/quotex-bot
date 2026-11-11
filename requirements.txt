@@ -7,3 +7,4 @@ python-dotenv>=1.0
 # Quotex data/execution client (unofficial). Install the one you choose, e.g.:
 # pyquotex
 libsql>=0.1.0
+git+https://github.com/cleitonleonel/pyquotex.git
