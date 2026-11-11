@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+flask>=3.0
+requests>=2.31
+python-dotenv>=1.0
+# Quotex data/execution client (unofficial). Install the one you choose, e.g.:
+# pyquotex

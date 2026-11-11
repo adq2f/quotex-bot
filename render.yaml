@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: quotex-signal-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ACCOUNT_TYPE
+        value: DEMO
+      - key: EXECUTION_MODE
+        value: signal_only
+      - key: DATA_SOURCE
+        value: quotex
+      - key: DB_PATH
+        value: /data/quotex_bot.db
+      - key: MTG_ENABLED
+        value: "false"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: QUOTEX_EMAIL
+        sync: false
+      - key: QUOTEX_PASSWORD
+        sync: false
+      - key: ADMIN_KEY
+        generateValue: true
+    disk:
+      name: bot-data
+      mountPath: /data
+      sizeGB: 1
