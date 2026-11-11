@@ -9,11 +9,13 @@ Sources:
   QuotexSource    : adapter for an UNOFFICIAL Quotex client library. This is the ONLY part that could not
                     be tested here (no network/library). Verify it against the library version you install.
 
-FIX LOG v2.5:
-  - Added a monkey-patch for `curl_cffi.requests.models.Response` to fix the 
-    `AttributeError: 'Response' object has no attribute 'reason_phrase'` bug inside pyquotex.
+FIX LOG v2.6:
+  - Added monkey-patch for curl_cffi Response (fixes 'reason_phrase' error).
+  - Added support for manual cookies (QUOTEX_COOKIE env var) to bypass Cloudflare 403 blocks.
+  - Added optional proxy support (QUOTEX_PROXY env var).
 """
 import asyncio
+import os
 import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -153,15 +155,37 @@ def load_csv(path: str) -> pd.DataFrame:
 class QuotexSource(CandleSource):
     """Adapter around an unofficial async Quotex client (e.g. `pyquotex`)."""
 
-    def __init__(self, email: str, password: str, demo: bool = True):
+    def __init__(self, email: str, password: str, demo: bool = True, proxy: str = None):
         try:
             from pyquotex.stable_api import Quotex  # type: ignore
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             raise RuntimeError("Install your Quotex client library (e.g. pyquotex) to use DATA_SOURCE=quotex") from e
+        
         self._loop = asyncio.new_event_loop()
         self._t = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._t.start()
-        self.client = Quotex(email=email, password=password)
+        
+        cookie_str = os.getenv("QUOTEX_COOKIE", "")
+        
+        # প্রক্সি এবং ক্লায়েন্ট সেটআপ
+        if proxy:
+            print(f"[QuotexSource] Using proxy: {proxy}")
+            self.client = Quotex(email=email, password=password, proxy=proxy)
+        else:
+            self.client = Quotex(email=email, password=password)
+            
+        # ম্যানুয়াল কুকি অ্যাপ্লাই করা (Cloudflare বাইপাসের জন্য)
+        if cookie_str:
+            print("[QuotexSource] Using manual cookies for Cloudflare bypass...")
+            try:
+                # pyquotex-এ কুকি সেট করার মেথড
+                self.client.set_session(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 
+                    cookies=cookie_str
+                )
+            except Exception as e:
+                print(f"[QuotexSource] Cookie apply failed: {e}")
+
         self.demo = demo
         ok, reason = self._run(self.client.connect())
         if not ok:
@@ -212,7 +236,8 @@ class QuotexSource(CandleSource):
 
 def make_source(cfg) -> CandleSource:
     if cfg.data_source == "quotex":
-        return QuotexSource(cfg.quotex_email, cfg.quotex_password, demo=(cfg.account_type == "DEMO"))
+        proxy = os.getenv("QUOTEX_PROXY", None) # Render-এ সেট করা থাকলে কাজ করবে
+        return QuotexSource(cfg.quotex_email, cfg.quotex_password, demo=(cfg.account_type == "DEMO"), proxy=proxy)
     if cfg.data_source == "csv":
         return CSVSource(cfg.csv_dir)
     return SyntheticSource()
