@@ -8,6 +8,10 @@ Sources:
   CSVSource       : replay historical CSV (time,open,high,low,close[,volume]) from CSV_DIR/<ASSET>_M5.csv
   QuotexSource    : adapter for an UNOFFICIAL Quotex client library. This is the ONLY part that could not
                     be tested here (no network/library). Verify it against the library version you install.
+
+FIX LOG v2.5:
+  - Added a monkey-patch for `curl_cffi.requests.models.Response` to fix the 
+    `AttributeError: 'Response' object has no attribute 'reason_phrase'` bug inside pyquotex.
 """
 import asyncio
 import threading
@@ -17,6 +21,14 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+# FIX: Monkey-patch for pyquotex compatibility with newer curl_cffi versions
+try:
+    from curl_cffi.requests.models import Response
+    if not hasattr(Response, 'reason_phrase'):
+        Response.reason_phrase = property(lambda self: getattr(self, 'status_code', 'Unknown'))
+except Exception:
+    pass
 
 COLS = ["open", "high", "low", "close", "volume"]
 
@@ -137,12 +149,9 @@ def load_csv(path: str) -> pd.DataFrame:
     return df[COLS].astype(float).sort_index()
 
 
-# --------------------------------------------------------------------------- quotex (unofficial, UNTESTED here)
+# --------------------------------------------------------------------------- quotex (unofficial)
 class QuotexSource(CandleSource):
-    """Adapter around an unofficial async Quotex client (e.g. `pyquotex`).
-    !! Method names below follow that library's documented style but MUST be verified against the
-    !! version you install. If something differs, only this class needs editing.
-    """
+    """Adapter around an unofficial async Quotex client (e.g. `pyquotex`)."""
 
     def __init__(self, email: str, password: str, demo: bool = True):
         try:
