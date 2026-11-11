@@ -1,0 +1,95 @@
+"""
+filters.py  --  Rulebook Sections 5 and 7 (sessions, rollover, volatility, gap, spread).
+Each check returns (ok: bool, reason: str).
+
+FIX LOG v2.2:
+  - session_ok() now handles OTC wrap-around sessions correctly (e.g. OTC_SESSION_UTC="22:00-04:00").
+    The old code returned False for EVERY minute of the day when a wrap-around window was configured,
+    silently disabling the bot. Uses _in_window() for all boundary checks and explicitly verifies
+    that `now` is inside the OTC session (not just outside the first/last 15-minute blocks).
+"""
+from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
+
+import pandas as pd
+
+from .config import is_otc
+from .indicators import atr
+
+
+def _hm(s: str) -> int:
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _in_window(minute_of_day: int, a: int, b: int) -> bool:
+    """True if minute_of_day ∈ [a, b). Handles wrap-around (a > b) correctly."""
+    if a == b:                       # single point, treat as "never" for safety
+        return False
+    if a < b:
+        return a <= minute_of_day < b
+    return minute_of_day >= a or minute_of_day < b
+
+
+def session_ok(asset: str, now: datetime, cfg) -> Tuple[bool, str]:
+    m = now.hour * 60 + now.minute
+
+    # 5.4 daily rollover window (applies to OTC and real both)
+    a, b = cfg.rollover_block_utc.split("-")
+    if _in_window(m, _hm(a), _hm(b)):
+        return False, "daily rollover window [5.4]"
+
+    if is_otc(asset):
+        s, e = cfg.otc_session_utc.split("-")
+        start = _hm(s)
+        end = 24 * 60 if e.strip() == "24:00" else _hm(e)
+
+        # Outside the session at all? (only enforced when the user has set a non-24h window)
+        if not _in_window(m, start, end):
+            return False, "outside OTC session [5.2]"
+
+        # First N minutes after session open (wrap-aware)
+        if _in_window(m, start, (start + cfg.otc_block_minutes) % (24 * 60)):
+            return False, "first 15 min of OTC session [5.2]"
+
+        # Last N minutes before session close (wrap-aware)
+        if _in_window(m, (end - cfg.otc_block_minutes) % (24 * 60), end):
+            return False, "last 15 min of OTC session [5.2]"
+
+        return True, ""
+
+    # Real market: weekend + kill zones only
+    if now.weekday() >= 5:
+        return False, "real market closed (weekend)"
+    in_kz = any(a <= now.hour < b for a, b in (cfg.london_kz, cfg.newyork_kz))
+    if not in_kz:
+        return False, "outside London/NY kill zone [5.3]"
+    return True, ""
+
+
+class VolatilityGuard:
+    """7.3 ATR lock (10 min pause), 5.2 OTC ATR>2x wait, 7.5 gap lock."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.locked_until: Dict[str, datetime] = {}
+
+    def check(self, asset: str, df: pd.DataFrame, now: datetime, spread_ratio: Optional[float] = None) -> Tuple[bool, str]:
+        cfg = self.cfg
+        until = self.locked_until.get(asset)
+        if until and now < until:
+            return False, f"volatility lock until {until.strftime('%H:%M')} UTC [7.3]"
+        if len(df) >= cfg.atr_period + 25:
+            a = atr(df, cfg.atr_period)
+            avg = a.iloc[-21:-1].mean()
+            if avg and a.iloc[-1] > cfg.atr_lock_mult * avg:
+                self.locked_until[asset] = now + timedelta(minutes=cfg.atr_lock_pause_min)
+                return False, "ATR spike >2x avg [7.3" + ("/5.2" if is_otc(asset) else "") + "]"
+        if len(df) >= 5:
+            tail = df.iloc[-(cfg.gap_lock_candles + 1):]
+            gaps = ((tail["open"] - tail["close"].shift(1)).abs() / tail["close"].shift(1) * 100).dropna()
+            if (gaps > cfg.gap_lock_pct).any():
+                return False, "price gap >1% within last 3 candles [7.5]"
+        if spread_ratio is not None and spread_ratio > 2.0:
+            return False, "spread >2x average [7.4]"
+        return True, ""
