@@ -1,19 +1,37 @@
 """
-store.py  --  persistence (SQLite). Section 10: every decision + signal outcome is logged for audit/backtest.
-On Render the default disk is EPHEMERAL: attach a Render Disk (mount /data) and set DB_PATH=/data/quotex_bot.db,
-otherwise risk state (cooldown, read-only guard) and history reset on each deploy.
+store.py  --  persistence (SQLite / Turso Cloud). Section 10: every decision + signal outcome is logged for audit/backtest.
+On Render Free tier (no persistent disk), set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN to persist data in Turso cloud.
+If those env vars are missing, it falls back to local SQLite (for local testing).
 """
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# Try to import libsql for Turso Cloud
+try:
+    import libsql_experimental as libsql
+except ImportError:
+    libsql = None
+
 
 class Store:
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.lock = threading.Lock()
+        turso_url = os.getenv("TURSO_DATABASE_URL")
+        turso_token = os.getenv("TURSO_AUTH_TOKEN")
+
+        if turso_url and turso_token and libsql:
+            # Connect to Turso Cloud
+            print("[Store] Connecting to Turso Cloud Database...")
+            self.conn = libsql.connect(turso_url, auth_token=turso_token)
+        else:
+            # Fallback to Local SQLite (for local testing or if Turso vars are missing)
+            print(f"[Store] Using local SQLite database: {path}")
+            self.conn = sqlite3.connect(path, check_same_thread=False)
+
         with self.lock:
             self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
