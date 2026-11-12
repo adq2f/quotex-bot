@@ -1,5 +1,5 @@
 """
-main.py  --  entry point. Flask web app + bot thread (paused until web login).
+main.py  --  Web app + bot thread. Professional signals only.
 """
 import sys
 import os
@@ -16,14 +16,14 @@ from typing import Dict, Optional
 import pandas as pd
 
 from bot.chart import cleanup_old, render_result_chart, render_signal_chart
-from bot.config import settings, validate
+from bot.config import settings, validate, strategy_for_timeframe
 from bot.datafeed import make_source
 from bot.executor import Executor
 from bot.logger import log
 from bot.news import NewsFilter
 from bot.risk import RiskManager
 from bot.store import Store
-from bot.strategy import Decision, Strategy, section9_text
+from bot.strategy import Decision, Strategy
 from bot.telegram_out import Telegram
 from bot.tracker import Signal, Tracker, outcome_for, pnl_for
 from bot.controller import BotController
@@ -58,34 +58,28 @@ class Bot:
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.stop_event = threading.Event()
-        self._prepares: Dict[str, dict] = {}
         os.makedirs(cfg.charts_dir, exist_ok=True)
 
-        # Build strategy from persisted settings (or cfg defaults)
         self.strategy = None
         self._build_strategy()
 
-    # ------------------------------------------------------------------ strategy selection
+    # ------------------------------------------------------------------ strategy
     def _build_strategy(self):
         store = self.store
-        mode = store.get_setting("strategy_mode", self.cfg.strategy_mode) or "rulebook"
         tf = int(store.get_setting("web_timeframe_seconds", self.cfg.web_timeframe_seconds) or 300)
         if tf not in (60, 300, 900, 3600):
             tf = 300
-        if mode not in ("rulebook", "quick", "news"):
-            mode = "rulebook"
+        mode = strategy_for_timeframe(tf)
 
-        self.cfg = replace(self.cfg, web_timeframe_seconds=tf, entry_tf_seconds=tf, strategy_mode=mode)
+        self.cfg = replace(self.cfg, web_timeframe_seconds=tf,
+                           entry_tf_seconds=tf, strategy_mode=mode)
 
         if mode == "quick":
             from bot.strategy_quick import QuickStrategy
             self.strategy = QuickStrategy(self.cfg, self.news)
-        elif mode == "news":
-            from bot.strategy_news import NewsStrategy
-            self.strategy = NewsStrategy(self.cfg, self.news)
         else:
             self.strategy = Strategy(self.cfg, self.news)
-        log("strategy_built", mode=mode, tf=tf)
+        log("strategy_built", mode=mode, tf=tf, assets=len(self.cfg.whitelist))
 
     # ------------------------------------------------------------------ helpers
     def _tz(self): return self.cfg.display_utc_offset_hours
@@ -127,8 +121,8 @@ class Bot:
                 "fvg": list(s.fvg) if s.fvg else None, "fvg_time": t(s.fvg_idx),
                 "sweep_level": s.sweep_level, "sweep_time": t(s.sweep_idx)}
 
-    # ------------------------------------------------------------------ sending
-    def _send_signal(self, sig, m5, section9):
+    # ------------------------------------------------------------------ signal msg
+    def _send_signal(self, sig, m5):
         path = os.path.join(self.cfg.charts_dir, f"sig_{sig.id}.png")
         info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step,
                 "tf_seconds": sig.tf_seconds, "entry_price": sig.entry_price,
@@ -137,19 +131,34 @@ class Bot:
             render_signal_chart(m5, info, path, self._tz())
         except Exception as e:
             log("chart_failed", error=str(e)[:200]); path = ""
-        tag = f"🔁 <b>MTG{sig.step}</b> " if sig.step else "📊 "
-        side = "🟢 CALL (BUY)" if sig.direction == "BUY" else "🔴 PUT (SELL)"
-        cap = (f"{tag}<b>{sig.asset}</b>  {side}\n"
-               f"Entry: <b>NOW</b> @ {sig.entry_price:.5f}  ({self._bd(sig.entry_time)} BD)\n"
-               f"Expiry: {self._expiry_text()} → {self._bd(sig.expiry_time)} BD\n"
-               f"Stake: ${sig.stake:.2f}   Score: {sig.score}   ID: {sig.id}")
+
+        if sig.direction == "BUY":
+            direction_line = "🟢⬆️  UP  (BUY / CALL)"
+        else:
+            direction_line = "🔴⬇️  DOWN  (SELL / PUT)"
+
+        tf_label = f"{self.cfg.entry_tf_seconds // 60} min"
+        mtg_tag = f"  ·  MTG{sig.step}" if sig.step else ""
+
+        cap = (
+            f"📢 <b>SIGNAL{mtg_tag}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{direction_line}</b>\n"
+            f"Pair: <b>{sig.asset}</b>\n"
+            f"Timeframe: {tf_label}\n"
+            f"Entry: <b>NOW</b> @ {sig.entry_price:.5f}\n"
+            f"Expiry: {self._expiry_text()}\n"
+            f"Confidence: <b>{sig.score}%</b>\n"
+            f"Stake: ${sig.stake:.2f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 {sig.id}"
+        )
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
             self.tg.message(cap)
-        if section9:
-            self.tg.message(section9, pre=True)
 
+    # ------------------------------------------------------------------ result msg
     def _send_result(self, sig, m5, outcome, pnl):
         path = os.path.join(self.cfg.charts_dir, f"res_{sig.id}.png")
         info = {"asset": sig.asset, "direction": sig.direction, "entry_price": sig.entry_price,
@@ -158,29 +167,38 @@ class Bot:
             render_result_chart(m5, info, sig.exit_price, outcome, pnl, path, self._tz())
         except Exception as e:
             log("chart_failed", error=str(e)[:200]); path = ""
-        icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}.get(outcome, "")
-        cap = (f"{icon} <b>{outcome}</b>  {sig.asset}  {'MTG%d ' % sig.step if sig.step else ''}\n"
-               f"P/L: <b>{('+$%.2f' % pnl) if pnl > 0 else (('-$%.2f' % abs(pnl)) if pnl < 0 else '$0.00')}</b>"
-               f"   Balance: ${self.risk.balance:.2f}\n"
-               f"Entry {sig.entry_price:.5f} → Exit {sig.exit_price:.5f}   ID: {sig.id}")
-        if path and os.path.exists(path): self.tg.photo(path, cap)
-        else: self.tg.message(cap)
 
-    # ------------------------------------------------------------------ PREPARE
+        if outcome == "WIN":
+            header = "✅ <b>WIN</b>"
+        elif outcome == "LOSS":
+            header = "❌ <b>LOSS</b>"
+        else:
+            header = "➖ <b>DRAW</b>"
+
+        mtg_tag = f"  ·  MTG{sig.step}" if sig.step else ""
+        pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
+
+        cap = (
+            f"{header}{mtg_tag}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Pair: <b>{sig.asset}</b>\n"
+            f"Result: <b>{pnl_str}</b>\n"
+            f"Balance: ${self.risk.balance:.2f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 {sig.id}"
+        )
+        if path and os.path.exists(path):
+            self.tg.photo(path, cap)
+        else:
+            self.tg.message(cap)
+
+    # ------------------------------------------------------------------ pre-scan (off)
     def _pre_scan(self, now):
         cfg = self.cfg
         if cfg.prepare_alert_seconds <= 0: return
         if self.source is None or self.pause_event.is_set(): return
         peek = getattr(self.source, "get_candles_peek", None)
         if peek is None: return
-
-        cutoff = now - timedelta(seconds=2 * cfg.entry_tf_seconds)
-        for a in list(self._prepares.keys()):
-            try:
-                if datetime.fromisoformat(self._prepares[a]["sent_at"]) <= cutoff:
-                    del self._prepares[a]
-            except Exception:
-                del self._prepares[a]
 
         candidates = []
         for asset in cfg.whitelist:
@@ -195,8 +213,6 @@ class Bot:
                 if d.score < cfg.prepare_min_score: continue
                 entry_time = d.candle_close or now
                 if entry_time <= now: continue
-                if asset in self._prepares and self._prepares[asset]["candle_close"] == entry_time.isoformat():
-                    continue
                 candidates.append((d, entry_time))
             except Exception as e:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
@@ -204,30 +220,14 @@ class Bot:
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         for d, entry_time in candidates[:cfg.prepare_max_per_cycle]:
             secs = int((entry_time - now).total_seconds())
-            self._prepares[d.asset] = {"direction": d.decision, "sent_at": now.isoformat(),
-                                        "candle_close": entry_time.isoformat(), "score": d.score}
-            side = "🟢 CALL (BUY)" if d.decision == "BUY" else "🔴 PUT (SELL)"
-            msg = (f"⏰ <b>PREPARE — {d.asset}</b>\n"
-                   f"Signal likely: {side}\n"
-                   f"Entry in <b>{secs}s</b> (at {self._bd(entry_time)} BD)\n"
-                   f"Peek score: {d.score}\n"
-                   f"<i>Confirm at candle close. May be cancelled.</i>")
-            self.tg.message(msg)
-            log("prepare_sent", asset=d.asset, direction=d.decision, seconds=secs, score=d.score)
-
-    def _flush_prepare_cancels(self, now):
-        for asset, p in list(self._prepares.items()):
-            try:
-                close_at = datetime.fromisoformat(p["candle_close"])
-            except Exception:
-                del self._prepares[asset]; continue
-            if now >= close_at + timedelta(seconds=5):
-                self.tg.message(
-                    f"❌ CANCELLED — {asset}: setup failed at candle close "
-                    f"(peek score was {p['score']}, direction {p['direction']}). No trade."
-                )
-                del self._prepares[asset]
-                log("prepare_cancelled", asset=asset)
+            line = "🟢⬆️ UP (BUY)" if d.decision == "BUY" else "🔴⬇️ DOWN (SELL)"
+            self.tg.message(
+                f"⏰ <b>ENTRY IN {secs}s</b>\n"
+                f"{line}\n"
+                f"Pair: <b>{d.asset}</b>\n"
+                f"Confidence: {d.score}%"
+            )
+            log("prepare_sent", asset=d.asset, direction=d.decision, seconds=secs)
 
     # ------------------------------------------------------------------ resolve + MTG
     def resolve_due(self, now):
@@ -243,7 +243,7 @@ class Bot:
                 sig.tries += 1
                 if sig.tries >= 3:
                     self.tracker.close(sig, "VOID")
-                    self.tg.message(f"⚠️ {sig.asset} {sig.id}: expiry candle not available → VOID.")
+                    log("void_signal", asset=sig.asset, id=sig.id)
                 else:
                     self.tracker.update(sig)
                 continue
@@ -260,19 +260,18 @@ class Bot:
     def _try_mtg(self, sig, now):
         cfg = self.cfg
         if self.source is None or not cfg.mtg_enabled or sig.step >= cfg.mtg_max_steps: return
+        if not hasattr(self.strategy, "mtg_precheck"):
+            log("mtg_skipped", asset=sig.asset, reason="strategy_has_no_mtg"); return
         m5, h1, h4 = self._frames(sig.asset, now)
-        ok, why = self.strategy.mtg_precheck(sig.asset, sig.direction, m5, h1, h4, now) if hasattr(self.strategy, "mtg_precheck") else (False, "MTG not supported for this strategy")
-        if not ok:
-            self.tg.message(f"⏭ MTG skipped for {sig.asset}: {why}"); return
+        ok, why = self.strategy.mtg_precheck(sig.asset, sig.direction, m5, h1, h4, now)
+        if not ok: log("mtg_skipped", asset=sig.asset, reason=why); return
         payout = self._payout(sig.asset)
         ok, status = self.risk.can_open(sig.asset, sig.direction, now, payout,
                                         pending=len(self.tracker.pending), is_mtg=True)
-        if not ok:
-            self.tg.message(f"⏭ MTG skipped for {sig.asset}: {status}"); return
+        if not ok: log("mtg_skipped", asset=sig.asset, reason=status); return
         base = sig.base_stake or sig.stake
         stake = self.risk.mtg_stake(base, payout)
-        if stake is None:
-            self.tg.message(f"⏭ MTG skipped for {sig.asset}: sequence risk exceeds 2%."); return
+        if stake is None: log("mtg_skipped", asset=sig.asset, reason="seq_risk"); return
         entry_time = (m5.index[-1] + pd.Timedelta(seconds=cfg.entry_tf_seconds))
         expiry = entry_time + pd.Timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
         ms = Signal(asset=sig.asset, direction=sig.direction, entry_time=entry_time.isoformat(),
@@ -282,7 +281,7 @@ class Bot:
         self.tracker.add(ms)
         self.risk.register_signal(sig.asset, sig.direction, now, is_mtg=True)
         self.executor.execute(ms)
-        self._send_signal(ms, m5, None)
+        self._send_signal(ms, m5)
         log("mtg_signal", id=ms.id, parent=sig.id, stake=stake)
 
     def reconnect_source(self):
@@ -312,8 +311,8 @@ class Bot:
             gate = getattr(d, "gate", "") or ""
             self.diag[gate or d.decision] += 1
             payload = d.to_dict() if hasattr(d, "to_dict") else {
-                "asset": getattr(d, "asset", asset), "decision": d.decision, "score": d.score,
-                "notes": getattr(d, "notes", "")}
+                "asset": getattr(d, "asset", asset), "decision": d.decision,
+                "score": d.score, "notes": getattr(d, "notes", "")}
             self.store.log_decision(asset, d.decision, d.score, gate, payload)
             if d.decision != "HOLD":
                 cands.append((d, m5))
@@ -321,16 +320,14 @@ class Bot:
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
-            log("signal_stale", asset=d.asset, age=round(age, 1))
-            self.diag["stale_signal"] += 1; return
+            log("signal_stale", asset=d.asset, age=round(age, 1)); return
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
         d.payout_pct, d.risk_status = payout, status
         cu = self.risk.cooldown_active(now)
         d.cooldown = f"Active until {cu.strftime('%H:%M')} UTC" if cu else "Not active"
         if not ok:
-            log("risk_block", asset=d.asset, status=status)
-            self.diag["risk_block"] += 1; return
+            log("risk_block", asset=d.asset, status=status); return
         d.stake = self.risk.base_stake(d.asset, payout)
         entry_time = d.candle_close
         expiry = entry_time + timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
@@ -341,11 +338,7 @@ class Bot:
         self.tracker.add(sig)
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
-        if isinstance(d, Decision):
-            self._send_signal(sig, m5, section9_text(d, self._tz(), self._expiry_text()))
-        else:
-            self._send_signal(sig, m5, None)
-        self._prepares.pop(d.asset, None)
+        self._send_signal(sig, m5)
         log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=d.stake)
 
     # ------------------------------------------------------------------ reports
@@ -373,13 +366,16 @@ class Bot:
         def line(n, a):
             return (f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  "
                     f"WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}")
-        txt = (f"📈 <b>Daily report {today}</b>\n{line('Total', s['all'])}\n"
-               f"{line('Base', s['base'])}\n{line('MTG ', s['mtg'])}\n"
-               f"Balance: ${self.risk.balance:.2f}   "
-               f"Top blocker: {self.diag.most_common(1)[0][0] if self.diag else '-'}")
+        txt = (f"📈 <b>Daily Report · {today}</b>\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"{line('Total', s['all'])}\n"
+               f"{line('Base', s['base'])}\n"
+               f"{line('MTG', s['mtg'])}\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"Balance: ${self.risk.balance:.2f}")
         self.tg.message(txt)
 
-    # ------------------------------------------------------------------ cycle + loop
+    # ------------------------------------------------------------------ loop
     def cycle(self, now=None):
         now = now or utcnow()
         if self.source is None:
@@ -393,25 +389,14 @@ class Bot:
         self.resolve_due(now)
         if not self.pause_event.is_set():
             self.scan(now)
-            self._flush_prepare_cancels(now)
         self.daily_report(now)
         cleanup_old(self.cfg.charts_dir)
 
     def run_forever(self):
-        for w in validate(): log("config_warning", msg=w)
-
-        if self.source is None:
-            self.tg.message("⚠️ Bot thread online BUT data source not connected. Login to fix.")
-        else:
-            self.tg.message(
-                "🤖 Bot thread online | mode: %s | account: %s | MTG: %s | assets: %s\n"
-                "⏰ PREPARE: %ds before close | Strategy: %s @ %ds\n"
-                "⏸ Waiting for web login to begin scanning." %
-                (self.cfg.execution_mode, self.cfg.account_type,
-                 "ON" if self.cfg.mtg_enabled else "OFF", ", ".join(self.cfg.whitelist),
-                 self.cfg.prepare_alert_seconds, self.cfg.strategy_mode, self.cfg.entry_tf_seconds))
-
-        log("bot_loop_started")
+        for w in validate():
+            log("config_warning", msg=w)
+        log("bot_loop_started", mode=self.cfg.strategy_mode, tf=self.cfg.entry_tf_seconds,
+            assets=len(self.cfg.whitelist))
         while not self.stop_event.is_set():
             tf = self.cfg.entry_tf_seconds
             prepare_sec = max(0, self.cfg.prepare_alert_seconds)
@@ -419,7 +404,6 @@ class Bot:
             now_ts = time.time()
             next_boundary = (int(now_ts // tf) + 1) * tf
 
-            # Phase 1: PREPARE
             if prepare_sec > 0:
                 pre_at = next_boundary - prepare_sec
                 while time.time() < pre_at and not self.stop_event.is_set():
@@ -430,14 +414,12 @@ class Bot:
                     try: self._pre_scan(utcnow())
                     except Exception as e: log("pre_scan_cycle_error", error=str(e)[:300])
 
-            # Phase 2: wait for candle close
             while time.time() < next_boundary and not self.stop_event.is_set():
                 if self.cfg.entry_tf_seconds != tf: break
                 time.sleep(min(0.5, max(0.0, next_boundary - time.time())))
             if self.stop_event.is_set(): break
             if self.cfg.entry_tf_seconds != tf: continue
 
-            # Phase 3: full scan
             time.sleep(max(0.0, self.cfg.scan_delay_seconds))
             try: self.cycle()
             except Exception as e: log("cycle_error", error=str(e)[:300])
