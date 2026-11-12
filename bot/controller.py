@@ -10,7 +10,7 @@ from .logger import log
 
 class BotController:
     KEEPALIVE_HOURS = 1.0
-    PING_INTERVAL  = 300      # 5 minutes
+    PING_INTERVAL = 300
 
     def __init__(self, bot):
         self.bot = bot
@@ -49,7 +49,7 @@ class BotController:
         with self._lock:
             self._active_sessions.discard(session_id)
             if not self._active_sessions:
-                self._pause_locked(reason=f"logout:{username} (last session)")
+                self._pause_locked(reason=f"logout:{username}")
 
     def resume(self, reason: str = "manual"):
         with self._lock:
@@ -60,26 +60,14 @@ class BotController:
             self._pause_locked(reason=reason)
 
     def _resume_locked(self, reason: str):
-        was_paused = self.bot.pause_event.is_set()
         self.bot.pause_event.clear()
         self.bot.store.kv_set("bot_desired_running", True)
         log("bot_resumed", reason=reason, active=len(self._active_sessions))
-        if was_paused:
-            try:
-                self.bot.tg.message(f"▶️ Bot resumed ({reason}) — scanning for signals.")
-            except Exception:
-                pass
 
     def _pause_locked(self, reason: str):
-        was_running = not self.bot.pause_event.is_set()
         self.bot.pause_event.set()
         self.bot.store.kv_set("bot_desired_running", False)
         log("bot_paused", reason=reason, active=len(self._active_sessions))
-        if was_running:
-            try:
-                self.bot.tg.message(f"⏸ Bot paused ({reason}) — no new signals will be generated.")
-            except Exception:
-                pass
 
     def touch_keepalive(self, hours: float = None):
         hours = hours or self.KEEPALIVE_HOURS
@@ -94,8 +82,7 @@ class BotController:
         while not self._keepalive_stop.is_set():
             try:
                 self._keepalive_stop.wait(self.PING_INTERVAL)
-                if self._keepalive_stop.is_set():
-                    break
+                if self._keepalive_stop.is_set(): break
                 until = self.bot.store.kv_get("keepalive_until", 0)
                 if time.time() < until:
                     self._ping_self()
@@ -104,8 +91,7 @@ class BotController:
 
     def _ping_self(self):
         url = (os.getenv("RENDER_EXTERNAL_URL") or os.getenv("SELF_URL") or "").rstrip("/")
-        if not url:
-            return
+        if not url: return
         try:
             requests.get(f"{url}/health", timeout=30)
             log("keepalive_ping", url=url)
@@ -117,7 +103,7 @@ class BotController:
         remaining = max(0, int(until - time.time()))
         return {
             "started": bool(self._thread and self._thread.is_alive()),
-            "paused":  self.bot.pause_event.is_set(),
+            "paused": self.bot.pause_event.is_set(),
             "active_sessions": len(self._active_sessions),
             "keepalive_remaining_seconds": remaining,
         }
