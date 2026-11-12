@@ -1,6 +1,5 @@
 """
-strategy_quick.py  --  High-precision 1-min scalping for Quotex OTC.
-ADX_MIN lowered to 18 to allow weak trends (was 22, blocked 62% of assets).
+strategy_quick.py  --  1-min scalping with H4-dominant HTF bias.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,30 +21,22 @@ class QuickDecision:
 
 
 class QuickStrategy:
-    # ---- Confluence gate ----
-    MIN_CONFLUENCE = 2           # 2 of 5 (allows more signals)
-
-    # ---- Indicator thresholds ----
+    MIN_CONFLUENCE = 2
     RSI_BUY = 35.0
     RSI_SELL = 65.0
     BB_PROXIMITY = 0.10
     STOCH_LOW = 25.0
     STOCH_HIGH = 75.0
 
-    # ---- Quality filters ----
-    ADX_MIN = 18.0               # relaxed from 22 — allows weak trends
+    ADX_MIN = 18.0
     ATR_MIN_RATIO = 0.65
     ATR_MAX_RATIO = 2.5
 
-    # ---- MTF alignment ----
     REQUIRE_HTF_BIAS = True
     REQUIRE_M5_ALIGNMENT = True
-
-    # ---- Session window (UTC) ----
     USE_SESSION_FILTER = True
     ALLOWED_SESSIONS_UTC = [(6, 22)]
 
-    # ---- Momentum & DI ----
     REQUIRE_MOMENTUM = True
     REQUIRE_DI_AGREE = True
 
@@ -110,21 +101,27 @@ class QuickStrategy:
         return False
 
     def _htf_bias(self, h1, h4):
-        if len(h1) < 60 or len(h4) < 60:
+        """H4 dominant, H1 veto only if opposite."""
+        if len(h4) < 60:
             return "UNKNOWN"
-        h1_e20 = float(self._ema(h1["close"], 20).iloc[-1])
-        h1_e50 = float(self._ema(h1["close"], 50).iloc[-1])
-        h1_p = float(h1["close"].iloc[-1])
         h4_e20 = float(self._ema(h4["close"], 20).iloc[-1])
         h4_e50 = float(self._ema(h4["close"], 50).iloc[-1])
         h4_p = float(h4["close"].iloc[-1])
-        h1_bull = h1_p > h1_e20 > h1_e50
-        h1_bear = h1_p < h1_e20 < h1_e50
         h4_bull = h4_p > h4_e20 > h4_e50
         h4_bear = h4_p < h4_e20 < h4_e50
-        if h1_bull and h4_bull:
+        if not (h4_bull or h4_bear):
+            return "NEUTRAL"
+        h1_bull = False
+        h1_bear = False
+        if len(h1) >= 60:
+            h1_e20 = float(self._ema(h1["close"], 20).iloc[-1])
+            h1_e50 = float(self._ema(h1["close"], 50).iloc[-1])
+            h1_p = float(h1["close"].iloc[-1])
+            h1_bull = h1_p > h1_e20 > h1_e50
+            h1_bear = h1_p < h1_e20 < h1_e50
+        if h4_bull and not h1_bear:
             return "BULLISH"
-        if h1_bear and h4_bear:
+        if h4_bear and not h1_bull:
             return "BEARISH"
         return "NEUTRAL"
 
@@ -167,13 +164,11 @@ class QuickStrategy:
         pdi = float(plus_di.iloc[i])
         mdi = float(minus_di.iloc[i])
 
-        # ---- FILTER 2: ADX (relaxed to 18) ----
         if np.isnan(adx_val) or adx_val < self.ADX_MIN:
             d.gate = "low_adx"
             d.notes = f"ADX={adx_val:.1f}<{self.ADX_MIN}"
             return d
 
-        # ---- FILTER 3: ATR volatility ----
         atr_vals = atr_s.dropna()
         if len(atr_vals) >= 20:
             cur_atr = float(atr_vals.iloc[-1])
@@ -189,7 +184,6 @@ class QuickStrategy:
                     d.notes = f"ATR ratio={ratio:.2f}"
                     return d
 
-        # ---- FILTER 4: HTF bias ----
         bias = self._htf_bias(h1, h4) if self.REQUIRE_HTF_BIAS else "UNKNOWN"
         if bias == "UNKNOWN":
             d.gate = "htf_warmup"
@@ -197,10 +191,9 @@ class QuickStrategy:
             return d
         if self.REQUIRE_HTF_BIAS and bias == "NEUTRAL":
             d.gate = "htf_neutral"
-            d.notes = "H1/H4 neutral"
+            d.notes = "H4 neutral or H1 opposite"
             return d
 
-        # ---- 5-signal confluence ----
         band_width = bu - bl
         near_upper = (bu - c) <= band_width * self.BB_PROXIMITY
         near_lower = (c - bl) <= band_width * self.BB_PROXIMITY
@@ -218,23 +211,19 @@ class QuickStrategy:
         if sk < self.STOCH_LOW and sk > sd: buy += 1
         elif sk > self.STOCH_HIGH and sk < sd: sell += 1
 
-        # ---- FILTER 5: M5 EMA alignment ----
         m5_bull = (c > e20) and (e5 > e20)
         m5_bear = (c < e20) and (e5 < e20)
         m5_ok_buy = m5_bull if self.REQUIRE_M5_ALIGNMENT else True
         m5_ok_sell = m5_bear if self.REQUIRE_M5_ALIGNMENT else True
 
-        # ---- FILTER 6: Momentum ----
         buy_momentum = (e5 > e10) or (mh > 0)
         sell_momentum = (e5 < e10) or (mh < 0)
         mom_ok_buy = buy_momentum if self.REQUIRE_MOMENTUM else True
         mom_ok_sell = sell_momentum if self.REQUIRE_MOMENTUM else True
 
-        # ---- FILTER 7: DI direction ----
         di_buy_ok = (pdi > mdi) if self.REQUIRE_DI_AGREE else True
         di_sell_ok = (mdi > pdi) if self.REQUIRE_DI_AGREE else True
 
-        # ---- FILTER 8: bias match ----
         bias_ok_buy = (bias == "BULLISH") if self.REQUIRE_HTF_BIAS else True
         bias_ok_sell = (bias == "BEARISH") if self.REQUIRE_HTF_BIAS else True
 
