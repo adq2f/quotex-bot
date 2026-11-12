@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Quotex Signal Bot{% endblock %}
+{% block content %}
+
+<div class="row g-3 mb-3">
+    <div class="col-md-8">
+        <div class="card border-secondary">
+            <div class="card-body">
+                <h5 class="card-title mb-3">Bot Control</h5>
+                <div class="d-flex align-items-center gap-3 flex-wrap">
+                    <span id="bot-status-pill" class="badge bg-secondary fs-6">Loading…</span>
+                    <button id="btn-start" class="btn btn-success btn-sm">▶️ Start</button>
+                    <button id="btn-stop"  class="btn btn-warning btn-sm">⏸ Pause</button>
+                    <button id="btn-refresh" class="btn btn-outline-secondary btn-sm">🔄 Refresh</button>
+                    <span class="ms-auto text-secondary small" id="last-updated">—</span>
+                </div>
+                <div class="row mt-3 small text-secondary g-2">
+                    <div class="col-auto">Mode: <strong id="mode" class="text-light">—</strong></div>
+                    <div class="col-auto">Account: <strong id="account" class="text-light">—</strong></div>
+                    <div class="col-auto">MTG: <strong id="mtg" class="text-light">—</strong></div>
+                    <div class="col-auto">Assets: <strong id="assets" class="text-light">—</strong></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-secondary">
+            <div class="card-body">
+                <h5 class="card-title mb-3">Risk State</h5>
+                <div class="row text-center g-2">
+                    <div class="col-6"><div class="text-secondary small">Balance</div><div class="h5 mb-0" id="r-balance">—</div></div>
+                    <div class="col-6"><div class="text-secondary small">Day P/L</div><div class="h5 mb-0" id="r-day-pnl">—</div></div>
+                    <div class="col-6"><div class="text-secondary small">Consec Losses</div><div class="h5 mb-0" id="r-consec">—</div></div>
+                    <div class="col-6"><div class="text-secondary small">Cooldown</div><div class="h6 mb-0" id="r-cooldown">—</div></div>
+                </div>
+                <div id="readonly-banner" class="alert alert-danger mt-3 mb-0 d-none py-2 small">⚠️ Read-only (drawdown guard)</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card border-secondary"><div class="card-body">
+            <h6 class="text-secondary mb-2">All Signals</h6>
+            <div class="h4 mb-1" id="s-all-winrate">—</div>
+            <div class="small text-secondary">Win rate · PF <span id="s-all-pf">—</span></div>
+            <div class="small mt-1">P/L: <strong id="s-all-pnl">—</strong></div>
+        </div></div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-secondary"><div class="card-body">
+            <h6 class="text-secondary mb-2">Base (Step 0)</h6>
+            <div class="h4 mb-1" id="s-base-winrate">—</div>
+            <div class="small text-secondary">Win rate · PF <span id="s-base-pf">—</span></div>
+            <div class="small mt-1">P/L: <strong id="s-base-pnl">—</strong></div>
+        </div></div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-secondary"><div class="card-body">
+            <h6 class="text-secondary mb-2">MTG (Step 1+)</h6>
+            <div class="h4 mb-1" id="s-mtg-winrate">—</div>
+            <div class="small text-secondary">Win rate · PF <span id="s-mtg-pf">—</span></div>
+            <div class="small mt-1">P/L: <strong id="s-mtg-pnl">—</strong></div>
+        </div></div>
+    </div>
+</div>
+
+<div class="card border-secondary mb-4">
+    <div class="card-body">
+        <h5 class="card-title mb-3">Recent Signals (latest 20)</h5>
+        <div class="table-responsive">
+            <table class="table table-sm table-dark table-striped align-middle">
+                <thead><tr>
+                    <th>Time (UTC)</th><th>Asset</th><th>Side</th><th>Step</th>
+                    <th>Entry</th><th>Stake</th><th>Payout</th><th>Score</th><th>Status</th><th>P/L</th>
+                </tr></thead>
+                <tbody id="signals-body">
+                    <tr><td colspan="10" class="text-center text-secondary">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}
