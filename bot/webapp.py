@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask: auth + dashboard + bot control + diagnostics."""
+"""webapp.py  --  Flask: auth + dashboard + bot control + diagnostics + Telegram test."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -72,6 +72,7 @@ def create_app(bot, controller: BotController) -> Flask:
                     nxt = url_for("dashboard")
                 return redirect(nxt)
             flash("Invalid username or password", "danger")
+            log("login_fail", username=username)
         return render_template("login.html")
 
     @app.get("/logout")
@@ -80,6 +81,7 @@ def create_app(bot, controller: BotController) -> Flask:
         username = session.get("user")
         if sid:
             controller.on_logout(sid, username or "")
+        log("logout", username=username or "")
         session.clear()
         return redirect(url_for("login"))
 
@@ -125,6 +127,7 @@ def create_app(bot, controller: BotController) -> Flask:
         controller.pause(reason=f"manual:{session.get('user')}")
         return jsonify({"ok": True, "status": controller.status()})
 
+    # ------------------------------------------------------------ settings
     @app.get("/api/settings")
     @_auth_required
     def api_get_settings():
@@ -162,13 +165,13 @@ def create_app(bot, controller: BotController) -> Flask:
             "whitelist_count": len(bot.cfg.whitelist),
             "entry_tf_seconds": bot.cfg.entry_tf_seconds,
             "strategy": bot.cfg.strategy_mode,
+            "signal_max_age_seconds": bot.cfg.signal_max_age_seconds,
         }
         try:
             if bot.source is None:
                 result["error"] = "source is None (init failed)"
                 return jsonify(result)
 
-            # test raw get_candles for each timeframe
             for name, tf_sec in [("m_entry", bot.cfg.entry_tf_seconds), ("h1", 3600), ("h4", 14400)]:
                 try:
                     df = bot.source.get_candles(asset, tf_sec, 300, now)
@@ -182,7 +185,6 @@ def create_app(bot, controller: BotController) -> Flask:
                 except Exception as e:
                     result[f"{name}_exception"] = str(e)[:250]
 
-            # try full evaluate
             try:
                 m5, h1, h4 = bot._frames(asset, now)
                 result["frames_lengths"] = {"m5": len(m5), "h1": len(h1), "h4": len(h4)}
@@ -202,6 +204,16 @@ def create_app(bot, controller: BotController) -> Flask:
             result["error"] = str(e)[:300]
         return jsonify(result)
 
+    @app.get("/api/test/telegram")
+    @_auth_required
+    def api_test_telegram():
+        """Send a test message to Telegram and return detailed diagnostics."""
+        try:
+            return jsonify(bot.tg.test())
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+    # ------------------------------------------------------------ legacy JSON
     @app.get("/stats")
     @_auth_required
     def stats():
@@ -215,6 +227,7 @@ def create_app(bot, controller: BotController) -> Flask:
             "mtg_enabled": bot.cfg.mtg_enabled,
             "strategy_mode": bot.cfg.strategy_mode,
             "entry_tf_seconds": bot.cfg.entry_tf_seconds,
+            "signal_max_age_seconds": bot.cfg.signal_max_age_seconds,
             "summary": bot.summary_numbers(),
         })
 
