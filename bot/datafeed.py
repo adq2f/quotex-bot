@@ -20,6 +20,12 @@ try:
 except Exception:
     pass
 
+# ---- otcharts import (safe: won't crash if not installed yet) ----
+try:
+    from otcharts import Client as OTChartsClient
+except Exception:
+    OTChartsClient = None
+
 COLS = ["open", "high", "low", "close", "volume"]
 
 
@@ -139,7 +145,106 @@ def load_csv(path: str) -> pd.DataFrame:
     return df[COLS].astype(float).sort_index()
 
 
-# --------------------------------------------------------------------------- quotex (unofficial)
+# --------------------------------------------------------------------------- otcharts (Cloudflare-free Quotex data)
+class OTChartsSource(CandleSource):
+    """
+    Reads Quotex OTC candles via the otcharts HTTP API.
+    No login, no browser, no Cloudflare, no cookie — just an API key.
+    Requires: pip install 'otcharts[pandas]'
+    Set env var OTCHARTS_API_KEY=otc_live_...
+    """
+
+    QUOTEX_BOOK = "quotex"          # otcharts book name for Quotex
+    MAX_BARS    = 300               # API hard limit per request
+
+    def __init__(self):
+        if OTChartsClient is None:
+            raise RuntimeError("otcharts not installed. Run: pip install 'otcharts[pandas]'")
+        api_key = os.getenv("OTCHARTS_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "OTCHARTS_API_KEY is not set. "
+                "Get a free key at https://otcharts.com/login and add it to Render env vars."
+            )
+        # Client() automatically picks up OTCHARTS_API_KEY from env,
+        # but we pass it explicitly for clarity / safety.
+        self.client = OTChartsClient(api_key=api_key)
+        print(f"[OTChartsSource] Connected to otcharts book='{self.QUOTEX_BOOK}'")
+
+    # ---- candles ----
+    def get_candles(self, asset: str, tf_seconds: int, count: int, now=None):
+        """
+        asset: Quotex symbol, e.g. 'EURUSD_otc'
+        tf_seconds: e.g. 300 for M5
+        count: number of bars wanted (max 300)
+        """
+        try:
+            tf_minutes = max(1, int(tf_seconds) // 60)
+            limit = min(int(count), self.MAX_BARS)
+
+            # otcharts returns a list of Bar objects:
+            #   bar.time (unix seconds), .open, .high, .low, .close, .volume
+            bars = self.client.candles(
+                self.QUOTEX_BOOK,       # venue
+                asset,                  # symbol, e.g. 'EURUSD_otc'
+                tf=tf_minutes,          # timeframe in minutes
+                limit=limit,
+            )
+
+            if not bars:
+                return pd.DataFrame(columns=COLS)
+
+            rows, index = [], []
+            for b in bars:
+                ts = getattr(b, "time", None)
+                if ts is None:
+                    continue
+                # otcharts .time is unix seconds (int/float)
+                idx = pd.Timestamp(ts, unit="s", tz="UTC") if isinstance(ts, (int, float)) else pd.Timestamp(ts)
+                if idx.tzinfo is None:
+                    idx = idx.tz_localize("UTC")
+                index.append(idx)
+                rows.append({
+                    "open":   float(b.open),
+                    "high":   float(b.high),
+                    "low":    float(b.low),
+                    "close":  float(b.close),
+                    "volume": float(getattr(b, "volume", 0.0) or 0.0),
+                })
+
+            df = pd.DataFrame(rows, index=index)[COLS].sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+
+            # otcharts returns closed bars only, so drop_unclosed is unnecessary.
+            # But keep the last `count` bars to match the source contract.
+            return df.iloc[-limit:]
+
+        except Exception as e:
+            print(f"[OTChartsSource] get_candles failed for {asset}: {e}")
+            return pd.DataFrame(columns=COLS)
+
+    # ---- optional: payout ----
+    def get_payout(self, asset: str) -> Optional[float]:
+        """
+        otcharts free tier returns payout = null.
+        Lite+ plans may expose it. We return None so Bot falls back to
+        DEFAULT_PAYOUT_PCT (85) — already the case in main.py.
+        """
+        return None
+
+    # ---- not needed for signal_only ----
+    def get_balance(self) -> Optional[float]:
+        return None
+
+    def buy(self, asset, direction, stake, expiry_seconds):
+        raise NotImplementedError("otcharts is a data feed only — it cannot place trades.")
+
+    def close(self) -> None:
+        # HTTP client — nothing to close
+        pass
+
+
+# --------------------------------------------------------------------------- quotex (legacy, needs proxy+cookie on Render)
 class QuotexSource(CandleSource):
     """Adapter around an unofficial async Quotex client (e.g. `pyquotex`)."""
 
@@ -185,7 +290,6 @@ class QuotexSource(CandleSource):
         return self.client
 
     def reconnect(self, cookie: str = None):
-        """Reconnect with a new cookie (called from web UI when user updates it)."""
         try:
             self._run(self.client.close())
         except Exception:
@@ -229,7 +333,6 @@ class QuotexSource(CandleSource):
             return None
 
     def get_all_payouts(self) -> dict:
-        """Return {asset: payout_pct} for all available assets."""
         try:
             p = self._run(self.client.get_payment()) or {}
             out = {}
@@ -255,13 +358,29 @@ class QuotexSource(CandleSource):
             pass
 
 
+# --------------------------------------------------------------------------- factory
 def make_source(cfg, store=None) -> CandleSource:
-    if cfg.data_source == "quotex":
+    """
+    Pick the data source based on cfg.data_source.
+    Priority order (set via DATA_SOURCE env var):
+      otcharts  -> OTChartsSource      (RECOMMENDED — no Cloudflare)
+      quotex    -> QuotexSource        (legacy, needs proxy+cookie on Render)
+      csv       -> CSVSource           (offline backtest)
+      synthetic -> SyntheticSource     (safe smoke test)
+    """
+    src = (cfg.data_source or "synthetic").lower().strip()
+
+    if src == "otcharts":
+        return OTChartsSource()
+
+    if src == "quotex":
         proxy = os.getenv("QUOTEX_PROXY", None)
         cookie = (store.kv_get("quotex_cookie") if store else None) or os.getenv("QUOTEX_COOKIE", "")
         return QuotexSource(cfg.quotex_email, cfg.quotex_password,
                             demo=(cfg.account_type == "DEMO"),
                             proxy=proxy, cookie=cookie)
-    if cfg.data_source == "csv":
+
+    if src == "csv":
         return CSVSource(cfg.csv_dir)
+
     return SyntheticSource()
