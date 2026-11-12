@@ -44,6 +44,7 @@ class Store:
             """)
             self.conn.commit()
 
+    # ---- kv ----
     def kv_get(self, key: str, default: Any = None) -> Any:
         with self.lock:
             r = self.conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
@@ -55,6 +56,14 @@ class Store:
                               (key, json.dumps(value, default=str)))
             self.conn.commit()
 
+    # ---- web-controllable settings ----
+    def get_setting(self, key: str, default=None):
+        return self.kv_get(f"setting:{key}", default)
+
+    def set_setting(self, key: str, value):
+        self.kv_set(f"setting:{key}", value)
+
+    # ---- decisions ----
     def log_decision(self, asset: str, decision: str, score: int, gate: str, payload: Dict) -> None:
         with self.lock:
             self.conn.execute("INSERT INTO decisions(ts,asset,decision,score,gate,payload) VALUES(?,?,?,?,?,?)",
@@ -62,6 +71,7 @@ class Store:
                                json.dumps(payload, default=str)))
             self.conn.commit()
 
+    # ---- signals ----
     def save_signal(self, sig: Dict) -> None:
         with self.lock:
             self.conn.execute(
@@ -107,6 +117,7 @@ class Store:
             })
         return out
 
+    # ---- users ----
     def user_count(self) -> int:
         with self.lock:
             r = self.conn.execute("SELECT COUNT(*) FROM users").fetchone()
