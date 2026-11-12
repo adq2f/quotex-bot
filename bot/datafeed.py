@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# ---- yfinance import (optional, won't crash if not installed) ----
+# ---- yfinance import ----
 try:
     import yfinance as yf
 except Exception:
@@ -26,7 +26,6 @@ def utcnow() -> datetime:
 
 
 def drop_unclosed(df: pd.DataFrame, tf_seconds: int, now: datetime) -> pd.DataFrame:
-    """Remove the still-forming candle: a candle is closed once open_time + tf <= now."""
     if df.empty:
         return df
     close_time = df.index + pd.Timedelta(seconds=tf_seconds)
@@ -63,11 +62,13 @@ class CandleSource(ABC):
     def close(self) -> None:
         pass
 
+    def get_candles_peek(self, asset: str, tf_seconds: int, count: int,
+                         now: Optional[datetime] = None) -> pd.DataFrame:
+        """Default: fall back to get_candles (no forming candle)."""
+        return self.get_candles(asset, tf_seconds, count, now)
 
-# --------------------------------------------------------------------------- synthetic
+
 class SyntheticSource(CandleSource):
-    """Deterministic pseudo-market so the whole pipeline can be exercised without network."""
-
     def __init__(self, seed: int = 7, base_price: float = 1.1000, days: int = 120):
         self.seed, self.base, self.days = seed, base_price, days
         self._cache = {}
@@ -102,7 +103,6 @@ class SyntheticSource(CandleSource):
         return 85.0
 
 
-# --------------------------------------------------------------------------- csv replay
 class CSVSource(CandleSource):
     def __init__(self, directory: str):
         self.dir = directory
@@ -137,33 +137,14 @@ def load_csv(path: str) -> pd.DataFrame:
     return df[COLS].astype(float).sort_index()
 
 
-# --------------------------------------------------------------------------- yfinance (FREE, no API key)
 class YFinanceSource(CandleSource):
-    """
-    Free forex data via Yahoo Finance (yfinance).
-    Maps Quotex OTC symbols to Yahoo forex tickers:
-        EURUSD_otc -> EURUSD=X
-        GBPUSD_otc -> GBPUSD=X
-        USDJPY_otc -> USDJPY=X
-        XAUUSD_otc -> GC=F (gold futures)
-    No API key, no Cloudflare, no rate-limit issues in practice.
-    NOTE: real forex prices ≠ Quotex OTC prices, so signals are only for pipeline testing.
-    """
+    """Free forex data via Yahoo Finance."""
 
     SYMBOL_MAP = {
-        "EURUSD": "EURUSD=X",
-        "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X",
-        "AUDUSD": "AUDUSD=X",
-        "USDCAD": "USDCAD=X",
-        "USDCHF": "USDCHF=X",
-        "NZDUSD": "NZDUSD=X",
-        "EURGBP": "EURGBP=X",
-        "EURJPY": "EURJPY=X",
-        "GBPJPY": "GBPJPY=X",
-        "XAUUSD": "GC=F",
-        "BTCUSD": "BTC-USD",
-        "ETHUSD": "ETH-USD",
+        "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+        "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X", "USDCHF": "USDCHF=X",
+        "NZDUSD": "NZDUSD=X", "EURGBP": "EURGBP=X", "EURJPY": "EURJPY=X",
+        "GBPJPY": "GBPJPY=X", "XAUUSD": "GC=F", "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
     }
 
     def __init__(self):
@@ -175,62 +156,68 @@ class YFinanceSource(CandleSource):
         base = asset.lower().replace("_otc", "").replace("/", "").upper()
         return cls.SYMBOL_MAP.get(base, f"{base}=X")
 
-    def get_candles(self, asset: str, tf_seconds: int, count: int, now=None):
+    def get_candles(self, asset, tf_seconds, count, now=None):
         try:
             symbol = self._map_asset(asset)
             interval = tf_rule(tf_seconds).replace("min", "m").replace("1h", "60m").replace("4h", "1h")
-            # yfinance max range per interval
             period = "5d" if tf_seconds <= 300 else "1mo"
-            df = yf.download(
-                symbol, period=period, interval=interval,
-                progress=False, auto_adjust=False, threads=False,
-            )
+            df = yf.download(symbol, period=period, interval=interval,
+                             progress=False, auto_adjust=False, threads=False)
             if df is None or len(df) == 0:
                 return pd.DataFrame(columns=COLS)
-
-            # Normalize columns
             df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
             if "adj close" in df.columns:
                 df = df.drop(columns=["adj close"])
-            rename = {"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
-            df = df.rename(columns=rename)
-
             if "volume" not in df.columns:
                 df["volume"] = 0.0
-
             df = df[COLS].astype(float)
             df.index = pd.to_datetime(df.index, utc=True)
             df = df.sort_index()
             df = df[~df.index.duplicated(keep="last")]
-
-            # If we resampled to a higher timeframe, do it now
             if tf_seconds not in (60, 300, 900, 3600, 14400):
                 df = resample_ohlc(df, tf_rule(tf_seconds))
-
             df = drop_unclosed(df, tf_seconds, now or utcnow())
             return df.iloc[-count:]
-
         except Exception as e:
             print(f"[YFinanceSource] get_candles failed for {asset}: {e}")
             return pd.DataFrame(columns=COLS)
 
-    def get_payout(self, asset: str) -> Optional[float]:
-        # yfinance doesn't provide binary-option payouts; use default 85%
+    def get_candles_peek(self, asset, tf_seconds, count, now=None):
+        """Like get_candles but INCLUDES the forming candle (for PREPARE alerts)."""
+        try:
+            symbol = self._map_asset(asset)
+            interval = tf_rule(tf_seconds).replace("min", "m").replace("1h", "60m").replace("4h", "1h")
+            period = "5d" if tf_seconds <= 300 else "1mo"
+            df = yf.download(symbol, period=period, interval=interval,
+                             progress=False, auto_adjust=False, threads=False)
+            if df is None or len(df) == 0:
+                return pd.DataFrame(columns=COLS)
+            df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
+            if "adj close" in df.columns:
+                df = df.drop(columns=["adj close"])
+            if "volume" not in df.columns:
+                df["volume"] = 0.0
+            df = df[COLS].astype(float)
+            df.index = pd.to_datetime(df.index, utc=True)
+            df = df.sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+            # NOTE: no drop_unclosed — we want the forming candle
+            return df.iloc[-count:]
+        except Exception as e:
+            print(f"[YFinanceSource] peek failed for {asset}: {e}")
+            return pd.DataFrame(columns=COLS)
+
+    def get_payout(self, asset):
         return None
 
-    def close(self) -> None:
+    def close(self):
         pass
 
 
-# --------------------------------------------------------------------------- factory
 def make_source(cfg, store=None) -> CandleSource:
     src = (cfg.data_source or "synthetic").lower().strip()
-
     if src == "yfinance":
         return YFinanceSource()
-
     if src == "csv":
         return CSVSource(cfg.csv_dir)
-
-    # DEFAULT: synthetic (safe for smoke test)
     return SyntheticSource()
