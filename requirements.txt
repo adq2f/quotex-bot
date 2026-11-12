@@ -9,4 +9,5 @@ python-dotenv>=1.0
 libsql>=0.1.0
 
 # otcharts — Quotex OTC data without Cloudflare
+# (Replaces pyquotex + curl_cffi for signal-only mode)
 otcharts[pandas]>=0.4.0
