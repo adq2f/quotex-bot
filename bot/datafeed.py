@@ -1,11 +1,6 @@
 """
 datafeed.py  --  candle sources.
-Contract: get_candles() returns CLOSED candles only (rulebook 3.5), index = candle OPEN time (UTC, tz-aware),
-columns open/high/low/close/volume.
-
-FIX LOG v2.7:
-  - Fixed TypeError: Quotex.__init__() unexpected keyword 'proxy'. 
-    The pyquotex library requires 'proxies' as a dictionary, not 'proxy' as a string.
+Contract: get_candles() returns CLOSED candles only, index = candle OPEN time (UTC).
 """
 import asyncio
 import os
@@ -17,7 +12,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# FIX: Monkey-patch for pyquotex compatibility with newer curl_cffi versions
+# Monkey-patch for pyquotex compatibility with newer curl_cffi
 try:
     from curl_cffi.requests.models import Response
     if not hasattr(Response, 'reason_phrase'):
@@ -148,45 +143,59 @@ def load_csv(path: str) -> pd.DataFrame:
 class QuotexSource(CandleSource):
     """Adapter around an unofficial async Quotex client (e.g. `pyquotex`)."""
 
-    def __init__(self, email: str, password: str, demo: bool = True, proxy: str = None):
+    def __init__(self, email: str, password: str, demo: bool = True,
+                 proxy: str = None, cookie: str = None):
         try:
             from pyquotex.stable_api import Quotex  # type: ignore
         except Exception as e:
-            raise RuntimeError("Install your Quotex client library (e.g. pyquotex) to use DATA_SOURCE=quotex") from e
-        
+            raise RuntimeError("Install pyquotex to use DATA_SOURCE=quotex") from e
+
+        self._email, self._password, self._proxy = email, password, proxy
         self._loop = asyncio.new_event_loop()
         self._t = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._t.start()
-        
-        cookie_str = os.getenv("QUOTEX_COOKIE", "")
-        
-        # প্রক্সি এবং ক্লায়েন্ট সেটআপ (সঠিক প্যারামিটার 'proxies' ব্যবহার করে)
-        if proxy:
-            print(f"[QuotexSource] Using proxy: {proxy}")
-            proxies_dict = {
-                "http": proxy,
-                "https": proxy
-            }
-            self.client = Quotex(email=email, password=password, proxies=proxies_dict)
-        else:
-            self.client = Quotex(email=email, password=password)
-            
-        # ম্যানুয়াল কুকি অ্যাপ্লাই করা (Cloudflare বাইপাসের জন্য)
-        if cookie_str:
-            print("[QuotexSource] Using manual cookies for Cloudflare bypass...")
-            try:
-                self.client.set_session(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 
-                    cookies=cookie_str
-                )
-            except Exception as e:
-                print(f"[QuotexSource] Cookie apply failed: {e}")
-
         self.demo = demo
+
+        self.client = self._make_client(cookie)
         ok, reason = self._run(self.client.connect())
         if not ok:
             raise RuntimeError(f"Quotex connect failed: {reason}")
         self.client.change_account("PRACTICE" if demo else "REAL")
+
+    def _make_client(self, cookie: str):
+        from pyquotex.stable_api import Quotex  # type: ignore
+        if self._proxy:
+            print(f"[QuotexSource] Using proxy: {self._proxy}")
+            self.client = Quotex(email=self._email, password=self._password,
+                                 proxies={"http": self._proxy, "https": self._proxy})
+        else:
+            self.client = Quotex(email=self._email, password=self._password)
+        cookie_str = cookie if cookie is not None else os.getenv("QUOTEX_COOKIE", "")
+        if cookie_str:
+            print("[QuotexSource] Applying cookie...")
+            try:
+                self.client.set_session(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/120.0.0.0 Safari/537.36",
+                    cookies=cookie_str,
+                )
+            except Exception as e:
+                print(f"[QuotexSource] Cookie apply failed: {e}")
+        return self.client
+
+    def reconnect(self, cookie: str = None):
+        """Reconnect with a new cookie (called from web UI when user updates it)."""
+        try:
+            self._run(self.client.close())
+        except Exception:
+            pass
+        self.client = self._make_client(cookie)
+        ok, reason = self._run(self.client.connect())
+        if not ok:
+            raise RuntimeError(f"Quotex reconnect failed: {reason}")
+        self.client.change_account("PRACTICE" if self.demo else "REAL")
+        print("[QuotexSource] Reconnected successfully")
 
     def _run(self, coro, timeout=20):
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
@@ -219,6 +228,22 @@ class QuotexSource(CandleSource):
         except Exception:
             return None
 
+    def get_all_payouts(self) -> dict:
+        """Return {asset: payout_pct} for all available assets."""
+        try:
+            p = self._run(self.client.get_payment()) or {}
+            out = {}
+            for asset, info in p.items():
+                v = info.get("payment") or info.get("turbo_payment")
+                if v is not None:
+                    try:
+                        out[asset] = float(v)
+                    except Exception:
+                        pass
+            return out
+        except Exception:
+            return {}
+
     def buy(self, asset, direction, stake, expiry_seconds):
         status, _info = self._run(self.client.buy(stake, asset, direction.lower(), expiry_seconds))
         return bool(status)
@@ -230,10 +255,13 @@ class QuotexSource(CandleSource):
             pass
 
 
-def make_source(cfg) -> CandleSource:
+def make_source(cfg, store=None) -> CandleSource:
     if cfg.data_source == "quotex":
-        proxy = os.getenv("QUOTEX_PROXY", None) 
-        return QuotexSource(cfg.quotex_email, cfg.quotex_password, demo=(cfg.account_type == "DEMO"), proxy=proxy)
+        proxy = os.getenv("QUOTEX_PROXY", None)
+        cookie = (store.kv_get("quotex_cookie") if store else None) or os.getenv("QUOTEX_COOKIE", "")
+        return QuotexSource(cfg.quotex_email, cfg.quotex_password,
+                            demo=(cfg.account_type == "DEMO"),
+                            proxy=proxy, cookie=cookie)
     if cfg.data_source == "csv":
         return CSVSource(cfg.csv_dir)
     return SyntheticSource()
