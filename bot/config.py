@@ -36,8 +36,8 @@ def _list(name: str, default: str = "") -> List[str]:
 
 
 # ============================================================
-# All Quotex assets with 65%+ payout
-# (majors, crosses, high-payout exotics, crypto, commodities, indices)
+# Quotex assets with 65%+ payout AND available on biquote.io
+# (removed: XTIUSD, USTECH100, GERMANY40, JAPAN225 — not on biquote)
 # ============================================================
 DEFAULT_WHITELIST = (
     # ---- Major forex (93% payout) ----
@@ -51,44 +51,37 @@ DEFAULT_WHITELIST = (
     # ---- Crypto (75-92% payout) ----
     "BTCUSD_otc,ETHUSD_otc,LTCUSD_otc,XRPUSD_otc,BCHUSD_otc,"
     # ---- Commodities (70-85% payout) ----
-    "XAUUSD_otc,XAGUSD_otc,XTIUSD_otc,"
-    # ---- Indices (70-85% payout) ----
-    "US500_otc,US30_otc,USTECH100_otc,UK100_otc,GERMANY40_otc,JAPAN225_otc"
+    "XAUUSD_otc,XAGUSD_otc,"
+    # ---- Indices (only those biquote supports) ----
+    "US500_otc,US30_otc,UK100_otc"
 )
 
 
 @dataclass(frozen=True)
 class Settings:
-    # ---- Account / mode ----
     account_type: str = os.getenv("ACCOUNT_TYPE", "DEMO").upper()
     execution_mode: str = os.getenv("EXECUTION_MODE", "signal_only").lower()
     quotex_email: str = os.getenv("QUOTEX_EMAIL", "")
     quotex_password: str = os.getenv("QUOTEX_PASSWORD", "")
 
-    # ---- Telegram ----
     telegram_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
     display_utc_offset_hours: int = 6
 
-    # ---- Assets (all 65%+ payout) ----
     whitelist: Tuple[str, ...] = tuple(_list("ASSET_WHITELIST", DEFAULT_WHITELIST))
 
-    # ---- Timeframes / expiry ----
     entry_tf_seconds: int = _i("ENTRY_TF_SECONDS", 300)
     bias_tf_seconds: Tuple[int, int] = (14400, 3600)
     expiry_candles: int = min(max(_i("EXPIRY_CANDLES", 1), 1), 2)
     signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 10), 1), 30)
 
-    # ---- Web-controllable ----
     strategy_mode: str = os.getenv("STRATEGY_MODE", "rulebook").lower()
     web_timeframe_seconds: int = _i("WEB_TIMEFRAME_SECONDS", 300)
 
-    # ---- Prepare alert (OFF by default) ----
     prepare_alert_seconds: int = _i("PREPARE_ALERT_SECONDS", 0)
     prepare_min_score: int = _i("PREPARE_MIN_SCORE", 45)
     prepare_max_per_cycle: int = _i("PREPARE_MAX_PER_CYCLE", 3)
 
-    # ---- Risk ----
     max_risk_pct: float = min(max(_f("MAX_RISK_PCT", 1.0), 0.1), 2.0)
     daily_loss_pct: float = min(max(_f("DAILY_LOSS_PCT", 5.0), 0.5), 5.0)
     daily_profit_pct: float = _f("DAILY_PROFIT_PCT", 3.0)
@@ -101,16 +94,13 @@ class Settings:
     max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 20)
     asset_loss_lock: int = _i("ASSET_LOSS_LOCK", 3)
 
-    # ---- MTG ----
     mtg_enabled: bool = _b("MTG_ENABLED", False)
     mtg_max_steps: int = min(max(_i("MTG_MAX_STEPS", 1), 1), 2)
     mtg_base_risk_pct: float = min(max(_f("MTG_BASE_RISK_PCT", 0.5), 0.1), 1.0)
 
-    # ---- Scoring ----
     score_threshold: int = _i("SCORE_THRESHOLD", 55)
     watchlist_threshold: int = 45
 
-    # ---- Indicators ----
     rsi_period: int = 14
     rsi_buy_max: float = 30.0
     rsi_sell_min: float = 70.0
@@ -124,24 +114,20 @@ class Settings:
     atr_period: int = 14
     ema_bias: int = 200
 
-    # ---- SMC ----
     fresh_zone_lookback: int = 20
     swing_lookback: int = 5
 
-    # ---- Fakeout ----
     min_body_ratio: float = 0.50
     min_pattern_body_ratio: float = 0.30
     max_wick_body_mult: float = 2.0
     volume_lookback: int = 20
 
-    # ---- Sessions ----
     london_kz: Tuple[int, int] = (8, 10)
     newyork_kz: Tuple[int, int] = (13, 15)
     otc_size_multiplier: float = 0.5
     otc_block_minutes: int = 15
     otc_atr_max_mult: float = 2.0
 
-    # ---- News ----
     news_block_before_min: int = 15
     news_block_after_min: int = 15
     atr_lock_mult: float = 2.0
@@ -152,7 +138,6 @@ class Settings:
 
     database_url: str = os.getenv("DATABASE_URL", "")
 
-    # ---- v2.1 ----
     virtual_balance: float = _f("VIRTUAL_BALANCE", 1000.0)
     default_payout_pct: float = _f("DEFAULT_PAYOUT_PCT", 85.0)
     stop_on_daily_profit: bool = _b("STOP_ON_DAILY_PROFIT", True)
@@ -177,7 +162,6 @@ class Settings:
     scan_delay_seconds: float = _f("SCAN_DELAY_SECONDS", 0.5)
     daily_report_hour_utc: int = _i("DAILY_REPORT_HOUR_UTC", 17)
 
-    # ---- Data source ----
     data_source: str = os.getenv("DATA_SOURCE", "synthetic").lower()
     csv_dir: str = os.getenv("CSV_DIR", "data")
 
@@ -208,17 +192,13 @@ def validate() -> List[str]:
     return warnings
 
 
-# ============================================================
-# Timeframe → Strategy auto-lock (no user choice)
-# ============================================================
 TIMEFRAME_STRATEGY_MAP = {
-    60:   "quick",       # 1 min → Quick M1 (EMA+RSI+MACD+BB+Stoch)
-    300:  "rulebook",    # 5 min → Rulebook (SMC)
-    900:  "rulebook",    # 15 min → Rulebook
-    3600: "rulebook",    # 1 hour → Rulebook
+    60:   "quick",
+    300:  "rulebook",
+    900:  "rulebook",
+    3600: "rulebook",
 }
 
 
 def strategy_for_timeframe(tf_seconds: int) -> str:
-    """Return the ONLY correct strategy for this timeframe."""
     return TIMEFRAME_STRATEGY_MAP.get(int(tf_seconds), "rulebook")
