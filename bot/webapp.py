@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask app with session auth + dashboard + bot control + settings API."""
+"""webapp.py  --  Flask: auth + dashboard + bot control + timeframe API."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -10,6 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 from .logger import log
 from .controller import BotController
+from .config import strategy_for_timeframe
 
 
 def _auth_required(f):
@@ -42,8 +43,7 @@ def create_app(bot, controller: BotController) -> Flask:
         password = os.getenv("WEB_ADMIN_PASSWORD", "")
         if not password:
             password = secrets.token_urlsafe(12)
-            log("admin_seeded_random", username=username, password=password,
-                note="Set WEB_ADMIN_PASSWORD in env. Shown once only.")
+            log("admin_seeded_random", username=username, password=password)
         store.create_user(username, generate_password_hash(password))
         log("admin_created", username=username)
 
@@ -70,7 +70,6 @@ def create_app(bot, controller: BotController) -> Flask:
                 if not nxt.startswith("/"): nxt = url_for("dashboard")
                 return redirect(nxt)
             flash("Invalid username or password", "danger")
-            log("login_fail", username=username)
         return render_template("login.html")
 
     @app.get("/logout")
@@ -78,7 +77,6 @@ def create_app(bot, controller: BotController) -> Flask:
         sid = session.get("sid")
         username = session.get("user")
         if sid: controller.on_logout(sid, username or "")
-        log("logout", username=username or "")
         session.clear()
         return redirect(url_for("login"))
 
@@ -123,31 +121,27 @@ def create_app(bot, controller: BotController) -> Flask:
         controller.pause(reason=f"manual:{session.get('user')}")
         return jsonify({"ok": True, "status": controller.status()})
 
-    # ---- settings API ----
     @app.get("/api/settings")
     @_auth_required
     def api_get_settings():
+        tf = int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds) or 300)
         return jsonify({
-            "strategy_mode": store.get_setting("strategy_mode", bot.cfg.strategy_mode),
-            "web_timeframe_seconds": int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds)),
+            "web_timeframe_seconds": tf,
+            "strategy_mode": strategy_for_timeframe(tf),
         })
 
     @app.post("/api/settings")
     @_auth_required
     def api_set_settings():
         data = request.get_json() or {}
-        mode = data.get("strategy_mode")
         tf = data.get("web_timeframe_seconds")
-        if mode and mode not in ("rulebook", "quick", "news"):
-            return jsonify({"error": "invalid strategy_mode"}), 400
-        if tf and int(tf) not in (60, 300, 900, 3600):
+        if not tf or int(tf) not in (60, 300, 900, 3600):
             return jsonify({"error": "invalid web_timeframe_seconds"}), 400
-        if mode: store.set_setting("strategy_mode", mode)
-        if tf: store.set_setting("web_timeframe_seconds", int(tf))
+        store.set_setting("web_timeframe_seconds", int(tf))
         bot._build_strategy()
         return jsonify({"ok": True, "applied": {
-            "strategy_mode": store.get_setting("strategy_mode", bot.cfg.strategy_mode),
-            "web_timeframe_seconds": int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds)),
+            "web_timeframe_seconds": int(tf),
+            "strategy_mode": strategy_for_timeframe(int(tf)),
         }})
 
     @app.get("/stats")
