@@ -1,0 +1,5 @@
+body { background:#0b0f14; }
+.card { background:#141a21; }
+.card-title { color:#d7dde5; }
+.table-dark { --bs-table-bg: transparent; }
+.badge.fs-6 { padding:.45em .75em; }
