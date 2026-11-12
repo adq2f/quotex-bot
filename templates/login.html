@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Login — Quotex Signal Bot{% endblock %}
 {% block content %}
-<div class="row justify-content-center align-items-center" style="min-height: 70vh;">
-    <div class="col-md-5 col-lg-4">
+<div class="row justify-content-center align-items-center" style="min-height: 80vh;">
+    <div class="col-md-6 col-lg-5">
         <div class="card shadow-lg border-secondary">
             <div class="card-body p-4">
                 <h3 class="card-title mb-1 text-center">📊 Quotex Signal Bot</h3>
@@ -16,11 +16,28 @@
                         <label class="form-label">Password</label>
                         <input type="password" class="form-control" name="password" required>
                     </div>
+
+                    <hr class="border-secondary my-3">
+                    <p class="text-secondary small mb-2">
+                        <strong>Quotex Cookie</strong> (optional — required if Quotex blocks Render's IP)
+                    </p>
+                    {% if has_cookie %}
+                    <p class="text-success small mb-2">✅ A cookie is already saved. Leave blank to keep it.</p>
+                    {% endif %}
+                    <div class="mb-3">
+                        <textarea class="form-control font-monospace" name="quotex_cookie" rows="3"
+                                  placeholder="ci_session=...; cf_clearance=..."
+                                  style="font-size:0.8rem;"></textarea>
+                        <div class="form-text">
+                            Get this from your browser: log in at quotex.io → DevTools (F12) →
+                            Application → Cookies → copy all values for <code>quotex.io</code>.
+                        </div>
+                    </div>
+
                     <button class="btn btn-primary w-100" type="submit">Sign In</button>
                 </form>
                 <p class="text-secondary small text-center mt-3 mb-0">
-                    First boot? Check server logs for the generated admin password
-                    (or set <code>WEB_ADMIN_PASSWORD</code> in env before starting).
+                    First boot? Check server logs for generated admin password.
                 </p>
             </div>
         </div>
