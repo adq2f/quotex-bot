@@ -1,4 +1,4 @@
-"""controller.py  --  BotController: lifecycle + persistence + 1h keepalive."""
+"""controller.py  --  BotController: lifecycle + persistence + keepalive."""
 import os
 import threading
 import time
@@ -20,7 +20,6 @@ class BotController:
         self.bot.pause_event.set()
         self.bot.stop_event.clear()
 
-        # Restore desired running state after a Render restart
         desired = self.bot.store.kv_get("bot_desired_running", False)
         if desired:
             self.bot.pause_event.clear()
@@ -31,7 +30,6 @@ class BotController:
         self._keepalive_stop = threading.Event()
         self._start_keepalive()
 
-    # ------------------------------------------------------------------ thread
     def start_thread(self):
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -42,7 +40,6 @@ class BotController:
             log("bot_thread_started")
             return True
 
-    # ------------------------------------------------------------------ session
     def on_login(self, session_id: str, username: str = ""):
         with self._lock:
             self._active_sessions.add(session_id)
@@ -84,9 +81,7 @@ class BotController:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------ keepalive
     def touch_keepalive(self, hours: float = None):
-        """Extend the wake window. Call on every authenticated web request."""
         hours = hours or self.KEEPALIVE_HOURS
         until = time.time() + hours * 3600
         self.bot.store.kv_set("keepalive_until", until)
@@ -117,7 +112,6 @@ class BotController:
         except Exception as e:
             log("keepalive_ping_failed", error=str(e)[:200])
 
-    # ------------------------------------------------------------------ status
     def status(self) -> dict:
         until = self.bot.store.kv_get("keepalive_until", 0)
         remaining = max(0, int(until - time.time()))
