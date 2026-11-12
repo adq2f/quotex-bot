@@ -8,6 +8,5 @@ python-dotenv>=1.0
 # Turso Cloud Database
 libsql>=0.1.0
 
-# Yahoo Finance + browser impersonation (fixes cloud IP blocks)
-curl_cffi>=0.7.0
-yfinance>=0.2.40
+# biquote — free forex/CFD OHLC data (no API key, MT5 feed)
+biquote>=0.1.0
