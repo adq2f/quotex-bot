@@ -37,7 +37,7 @@ class Bot:
     def __init__(self, cfg=settings, source=None, telegram=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
-        self.source = source or make_source(cfg)
+        self.source = source or make_source(cfg, self.store)
         self.tg = telegram or Telegram(cfg)
         self.news = NewsFilter(cfg) if cfg.news_enabled else None
         self.strategy = Strategy(cfg, self.news)
@@ -48,7 +48,7 @@ class Bot:
         self._htf: Dict[tuple, pd.DataFrame] = {}
         self.pause_event = threading.Event()
         self.pause_event.set()
-        self.stop_event  = threading.Event()
+        self.stop_event = threading.Event()
         os.makedirs(cfg.charts_dir, exist_ok=True)
 
     def _tz(self) -> int:
@@ -90,8 +90,9 @@ class Bot:
 
     def _send_signal(self, sig: Signal, m5: pd.DataFrame, section9: Optional[str]):
         path = os.path.join(self.cfg.charts_dir, f"sig_{sig.id}.png")
-        info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step, "tf_seconds": sig.tf_seconds,
-                "entry_price": sig.entry_price, "expiry_text": f"expiry {self._expiry_text()}", "viz": sig.viz}
+        info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step,
+                "tf_seconds": sig.tf_seconds, "entry_price": sig.entry_price,
+                "expiry_text": f"expiry {self._expiry_text()}", "viz": sig.viz}
         try:
             render_signal_chart(m5, info, path, self._tz())
         except Exception as e:
@@ -112,8 +113,8 @@ class Bot:
 
     def _send_result(self, sig: Signal, m5: pd.DataFrame, outcome: str, pnl: float):
         path = os.path.join(self.cfg.charts_dir, f"res_{sig.id}.png")
-        info = {"asset": sig.asset, "direction": sig.direction, "entry_price": sig.entry_price, "entry_time": sig.entry_time,
-                "step": sig.step, "tf_seconds": sig.tf_seconds}
+        info = {"asset": sig.asset, "direction": sig.direction, "entry_price": sig.entry_price,
+                "entry_time": sig.entry_time, "step": sig.step, "tf_seconds": sig.tf_seconds}
         try:
             render_result_chart(m5, info, sig.exit_price, outcome, pnl, path, self._tz())
         except Exception as e:
@@ -162,7 +163,8 @@ class Bot:
             self.tg.message(f"⏭ MTG skipped for {sig.asset}: {why}")
             return
         payout = self._payout(sig.asset)
-        ok, status = self.risk.can_open(sig.asset, sig.direction, now, payout, pending=len(self.tracker.pending), is_mtg=True)
+        ok, status = self.risk.can_open(sig.asset, sig.direction, now, payout,
+                                        pending=len(self.tracker.pending), is_mtg=True)
         if not ok:
             self.tg.message(f"⏭ MTG skipped for {sig.asset}: {status}")
             return
@@ -173,14 +175,28 @@ class Bot:
             return
         entry_time = (m5.index[-1] + pd.Timedelta(seconds=cfg.entry_tf_seconds))
         expiry = entry_time + pd.Timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
-        ms = Signal(asset=sig.asset, direction=sig.direction, entry_time=entry_time.isoformat(), expiry_time=expiry.isoformat(),
-                    entry_price=float(m5["close"].iloc[-1]), stake=stake, payout_pct=payout, tf_seconds=cfg.entry_tf_seconds,
-                    step=sig.step + 1, parent_id=sig.id, base_stake=base, score=sig.score, viz=sig.viz)
+        ms = Signal(asset=sig.asset, direction=sig.direction,
+                    entry_time=entry_time.isoformat(), expiry_time=expiry.isoformat(),
+                    entry_price=float(m5["close"].iloc[-1]), stake=stake, payout_pct=payout,
+                    tf_seconds=cfg.entry_tf_seconds, step=sig.step + 1, parent_id=sig.id,
+                    base_stake=base, score=sig.score, viz=sig.viz)
         self.tracker.add(ms)
         self.risk.register_signal(sig.asset, sig.direction, now, is_mtg=True)
         self.executor.execute(ms)
         self._send_signal(ms, m5, None)
         log("mtg_signal", id=ms.id, parent=sig.id, stake=stake)
+
+    def reconnect_source(self):
+        """Rebuild data source with the latest cookie and reset HTF cache."""
+        from bot.datafeed import make_source
+        try:
+            self.source.close()
+        except Exception:
+            pass
+        self.source = make_source(self.cfg, self.store)
+        self.executor.source = self.source
+        self._htf = {}
+        log("source_reconnected")
 
     def scan(self, now: datetime):
         cfg = self.cfg
@@ -200,7 +216,8 @@ class Bot:
                 cands.append((d, m5))
         if not cands:
             return
-        d, m5 = max(cands, key=lambda x: x[0].score)
+        # Rank by score × (payout / 100) — prefers high-confidence AND high-payout setups
+        d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
             log("signal_stale", asset=d.asset, age=round(age, 1))
@@ -218,9 +235,11 @@ class Bot:
         d.stake = self.risk.base_stake(d.asset, payout)
         entry_time = d.candle_close
         expiry = entry_time + timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
-        sig = Signal(asset=d.asset, direction=d.decision, entry_time=entry_time.isoformat(), expiry_time=expiry.isoformat(),
-                     entry_price=d.entry_price, stake=d.stake, payout_pct=payout, tf_seconds=cfg.entry_tf_seconds,
-                     base_stake=d.stake, score=d.score, viz=self._viz(d, m5), notes=d.notes)
+        sig = Signal(asset=d.asset, direction=d.decision,
+                     entry_time=entry_time.isoformat(), expiry_time=expiry.isoformat(),
+                     entry_price=d.entry_price, stake=d.stake, payout_pct=payout,
+                     tf_seconds=cfg.entry_tf_seconds, base_stake=d.stake, score=d.score,
+                     viz=self._viz(d, m5), notes=d.notes)
         self.tracker.add(sig)
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
@@ -230,12 +249,17 @@ class Bot:
     def summary_numbers(self, since_iso: Optional[str] = None) -> Dict:
         rows = self.store.signal_rows(since_iso)
         def agg(rs):
-            w = sum(r["status"] == "WIN" for r in rs); l = sum(r["status"] == "LOSS" for r in rs)
-            gp = sum(r["pnl"] for r in rs if r["pnl"] > 0); gl = -sum(r["pnl"] for r in rs if r["pnl"] < 0)
+            w = sum(r["status"] == "WIN" for r in rs)
+            l = sum(r["status"] == "LOSS" for r in rs)
+            gp = sum(r["pnl"] for r in rs if r["pnl"] > 0)
+            gl = -sum(r["pnl"] for r in rs if r["pnl"] < 0)
             return {"win": w, "loss": l, "draw": sum(r["status"] == "DRAW" for r in rs),
                     "win_rate": round(100 * w / (w + l), 1) if (w + l) else None,
-                    "profit_factor": round(gp / gl, 2) if gl else None, "pnl": round(sum(r["pnl"] for r in rs), 2)}
-        return {"all": agg(rows), "base": agg([r for r in rows if r["step"] == 0]), "mtg": agg([r for r in rows if r["step"] > 0])}
+                    "profit_factor": round(gp / gl, 2) if gl else None,
+                    "pnl": round(sum(r["pnl"] for r in rs), 2)}
+        return {"all": agg(rows),
+                "base": agg([r for r in rows if r["step"] == 0]),
+                "mtg": agg([r for r in rows if r["step"] > 0])}
 
     def daily_report(self, now: datetime):
         cfg = self.cfg
@@ -244,7 +268,8 @@ class Bot:
             return
         self.store.kv_set("last_report", today)
         s = self.summary_numbers(today)
-        def line(n, a): return f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}"
+        def line(n, a):
+            return f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}"
         txt = (f"📈 <b>Daily report {today}</b>\n{line('Total', s['all'])}\n{line('Base', s['base'])}\n{line('MTG ', s['mtg'])}\n"
                f"Balance: ${self.risk.balance:.2f}   Top blocker: {self.diag.most_common(1)[0][0] if self.diag else '-'}")
         self.tg.message(txt)
