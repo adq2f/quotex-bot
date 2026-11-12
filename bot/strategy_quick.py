@@ -1,12 +1,6 @@
 """
 strategy_quick.py  --  High-precision 1-min scalping for Quotex OTC.
-Filters: session + ADX trend + ATR volatility + 3/5 confluence + HTF bias (H1 & H4)
-         + M5 EMA alignment + DI direction + momentum.
-
-HONEST NOTE:
-  On 1-minute binary options, no strategy consistently reaches 80-90% win rate.
-  This configuration targets 65-75% by REJECTING low-quality setups aggressively.
-  Expect fewer signals — quality over quantity.
+ADX_MIN lowered to 18 to allow weak trends (was 22, blocked 62% of assets).
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,7 +23,7 @@ class QuickDecision:
 
 class QuickStrategy:
     # ---- Confluence gate ----
-    MIN_CONFLUENCE = 3           # 3 of 5 (was 2)
+    MIN_CONFLUENCE = 2           # 2 of 5 (allows more signals)
 
     # ---- Indicator thresholds ----
     RSI_BUY = 35.0
@@ -39,16 +33,15 @@ class QuickStrategy:
     STOCH_HIGH = 75.0
 
     # ---- Quality filters ----
-    ADX_MIN = 22.0               # trending market only
-    ATR_MIN_RATIO = 0.65         # current ATR >= 65% of 20-period avg
-    ATR_MAX_RATIO = 2.5          # and <= 250% (no spike)
+    ADX_MIN = 18.0               # relaxed from 22 — allows weak trends
+    ATR_MIN_RATIO = 0.65
+    ATR_MAX_RATIO = 2.5
 
     # ---- MTF alignment ----
-    REQUIRE_HTF_BIAS = True      # H1 AND H4 must agree
-    REQUIRE_M5_ALIGNMENT = True  # M5 EMA20 must agree with signal
+    REQUIRE_HTF_BIAS = True
+    REQUIRE_M5_ALIGNMENT = True
 
     # ---- Session window (UTC) ----
-    # Block dead hours (22:00-06:00 UTC). Allow all major forex sessions.
     USE_SESSION_FILTER = True
     ALLOWED_SESSIONS_UTC = [(6, 22)]
 
@@ -60,7 +53,6 @@ class QuickStrategy:
         self.cfg = cfg
         self.news = news
 
-    # ------------------------------------------------------------------ helpers
     def _ema(self, s, n):
         return s.ewm(span=n, adjust=False).mean()
 
@@ -89,7 +81,6 @@ class QuickStrategy:
         return k, d
 
     def _adx(self, df, n=14):
-        """Wilder's ADX with +DI, -DI, ATR."""
         high = df["high"]
         low = df["low"]
         close = df["close"]
@@ -119,7 +110,6 @@ class QuickStrategy:
         return False
 
     def _htf_bias(self, h1, h4):
-        """Both H1 AND H4 must agree. Returns BULLISH / BEARISH / NEUTRAL / UNKNOWN."""
         if len(h1) < 60 or len(h4) < 60:
             return "UNKNOWN"
         h1_e20 = float(self._ema(h1["close"], 20).iloc[-1])
@@ -138,7 +128,6 @@ class QuickStrategy:
             return "BEARISH"
         return "NEUTRAL"
 
-    # ------------------------------------------------------------------ main
     def evaluate(self, asset, m5, h1, h4, now):
         d = QuickDecision(asset=asset)
         if len(m5) < 60:
@@ -150,13 +139,11 @@ class QuickStrategy:
         d.candle_close = (m5.index[-1] + pd.Timedelta(seconds=tf)).to_pydatetime()
         d.entry_price = float(m5["close"].iloc[-1])
 
-        # ---- FILTER 1: Session ----
         if not self._session_ok(now):
             d.gate = "session"
             d.notes = f"outside session (UTC hour {now.hour:02d})"
             return d
 
-        # ---- Compute all indicators ----
         close = m5["close"]
         ema5 = self._ema(close, 5)
         ema10 = self._ema(close, 10)
@@ -180,10 +167,10 @@ class QuickStrategy:
         pdi = float(plus_di.iloc[i])
         mdi = float(minus_di.iloc[i])
 
-        # ---- FILTER 2: ADX trend strength ----
+        # ---- FILTER 2: ADX (relaxed to 18) ----
         if np.isnan(adx_val) or adx_val < self.ADX_MIN:
             d.gate = "low_adx"
-            d.notes = f"ADX={adx_val:.1f}<{self.ADX_MIN} (ranging market)"
+            d.notes = f"ADX={adx_val:.1f}<{self.ADX_MIN}"
             return d
 
         # ---- FILTER 3: ATR volatility ----
@@ -195,14 +182,14 @@ class QuickStrategy:
                 ratio = cur_atr / avg_atr
                 if ratio < self.ATR_MIN_RATIO:
                     d.gate = "low_atr"
-                    d.notes = f"ATR ratio={ratio:.2f}<{self.ATR_MIN_RATIO}"
+                    d.notes = f"ATR ratio={ratio:.2f}"
                     return d
                 if ratio > self.ATR_MAX_RATIO:
                     d.gate = "atr_spike"
-                    d.notes = f"ATR ratio={ratio:.2f}>{self.ATR_MAX_RATIO}"
+                    d.notes = f"ATR ratio={ratio:.2f}"
                     return d
 
-        # ---- FILTER 4: HTF bias (H1 AND H4) ----
+        # ---- FILTER 4: HTF bias ----
         bias = self._htf_bias(h1, h4) if self.REQUIRE_HTF_BIAS else "UNKNOWN"
         if bias == "UNKNOWN":
             d.gate = "htf_warmup"
@@ -210,7 +197,7 @@ class QuickStrategy:
             return d
         if self.REQUIRE_HTF_BIAS and bias == "NEUTRAL":
             d.gate = "htf_neutral"
-            d.notes = "H1/H4 neutral (no trend)"
+            d.notes = "H1/H4 neutral"
             return d
 
         # ---- 5-signal confluence ----
@@ -247,11 +234,10 @@ class QuickStrategy:
         di_buy_ok = (pdi > mdi) if self.REQUIRE_DI_AGREE else True
         di_sell_ok = (mdi > pdi) if self.REQUIRE_DI_AGREE else True
 
-        # ---- FILTER 8: bias must match direction ----
+        # ---- FILTER 8: bias match ----
         bias_ok_buy = (bias == "BULLISH") if self.REQUIRE_HTF_BIAS else True
         bias_ok_sell = (bias == "BEARISH") if self.REQUIRE_HTF_BIAS else True
 
-        # ---- Final decision ----
         if (buy >= self.MIN_CONFLUENCE and bias_ok_buy and m5_ok_buy
                 and mom_ok_buy and di_buy_ok):
             d.decision = "BUY"
