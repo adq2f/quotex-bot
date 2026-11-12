@@ -1,6 +1,6 @@
 """
 strategy_quick.py  --  1-minute scalping strategy for Quotex OTC.
-Indicators: EMA(5,10,50) + RSI(14) + MACD(12,26,9) + BB(20,2) + Stochastic(14,3,3).
+Relaxed: 2 of 5 confluence instead of 3 → more frequent signals.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,6 +22,12 @@ class QuickDecision:
 
 
 class QuickStrategy:
+    # ---- Tunables ----
+    MIN_CONFLUENCE = 2           # 2 of 5 (was 3) → more signals
+    RSI_BUY = 40.0               # was 30 (relaxed)
+    RSI_SELL = 60.0              # was 70 (relaxed)
+    BB_PROXIMITY = 0.15          # within 15% of band width counts as "touch"
+
     def __init__(self, cfg, news=None):
         self.cfg = cfg
         self.news = news
@@ -77,30 +83,45 @@ class QuickStrategy:
         e5, e10, e50 = float(ema5.iloc[i]), float(ema10.iloc[i]), float(ema50.iloc[i])
         r = float(rsi.iloc[i])
         mh = float(hist.iloc[i])
-        bu, bl = float(bb_up.iloc[i]), float(bb_lo.iloc[i])
+        bu, bm, bl = float(bb_up.iloc[i]), float(bb_mid.iloc[i]), float(bb_lo.iloc[i])
         sk, sd = float(stoch_k.iloc[i]), float(stoch_d.iloc[i])
+
+        band_width = bu - bl
+        near_upper = (bu - c) <= band_width * self.BB_PROXIMITY
+        near_lower = (c - bl) <= band_width * self.BB_PROXIMITY
 
         buy = 0
         sell = 0
+
+        # 1. EMA alignment
         if e5 > e10 > e50 and c > e5: buy += 1
-        if e5 < e10 < e50 and c < e5: sell += 1
-        if r < 30: buy += 1
-        if r > 70: sell += 1
+        elif e5 < e10 < e50 and c < e5: sell += 1
+
+        # 2. RSI (relaxed thresholds)
+        if r < self.RSI_BUY: buy += 1
+        elif r > self.RSI_SELL: sell += 1
+
+        # 3. MACD histogram
         if mh > 0: buy += 1
         else: sell += 1
-        if c <= bl: buy += 1
-        elif c >= bu: sell += 1
-        if sk < 20 and sk > sd: buy += 1
-        if sk > 80 and sk < sd: sell += 1
 
-        if buy >= 3:
+        # 4. Bollinger (proximity instead of exact touch)
+        if near_lower: buy += 1
+        elif near_upper: sell += 1
+
+        # 5. Stochastic cross (relaxed)
+        if sk < 30 and sk > sd: buy += 1
+        elif sk > 70 and sk < sd: sell += 1
+
+        if buy >= self.MIN_CONFLUENCE:
             d.decision = "BUY"
             d.score = 50 + buy * 10
-            d.notes = f"EMA={e5:.5f}/{e10:.5f} RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f}"
-        elif sell >= 3:
+            d.notes = f"BUY {buy}/5 | RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f} BB={'lo' if near_lower else 'mid'}"
+        elif sell >= self.MIN_CONFLUENCE:
             d.decision = "SELL"
             d.score = 50 + sell * 10
-            d.notes = f"EMA={e5:.5f}/{e10:.5f} RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f}"
+            d.notes = f"SELL {sell}/5 | RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f} BB={'hi' if near_upper else 'mid'}"
         else:
-            d.notes = "no confluence"
+            d.gate = "no_confluence"
+            d.notes = f"buy={buy} sell={sell} RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f}"
         return d
