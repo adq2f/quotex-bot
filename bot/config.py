@@ -134,12 +134,12 @@ class Settings:
     virtual_balance: float = _f("VIRTUAL_BALANCE", 1000.0)       # used in signal_only mode
     default_payout_pct: float = _f("DEFAULT_PAYOUT_PCT", 85.0)   # used if feed cannot supply payout
     stop_on_daily_profit: bool = _b("STOP_ON_DAILY_PROFIT", True)  # 6.4
-    indicator_window: int = max(_i("INDICATOR_WINDOW", 1), 1)    # 1 = strict: RSI/MACD/BB must fire on the confirmation candle
+    indicator_window: int = max(_i("INDICATOR_WINDOW", 1), 1)    # 1 = strict
     smc_require_fvg: bool = _b("SMC_REQUIRE_FVG", True)          # 2.3
     sweep_lookback: int = 8
     sweep_min_wick_ratio: float = 0.40
     impulse_body_mult: float = 1.5
-    three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)   # 4.4 (literal rule; ~never true on forex)
+    three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)   # 4.4
     min_entry_candles: int = 60
     min_bias_candles: int = 200
     stake_min: float = 1.0
@@ -151,10 +151,17 @@ class Settings:
     db_path: str = os.getenv("DB_PATH", "quotex_bot.db")         # on Render: mount a Disk and use /data/quotex_bot.db
     charts_dir: str = os.getenv("CHARTS_DIR", "charts_tmp")
     admin_key: str = os.getenv("ADMIN_KEY", "")
-    allow_real_execution: bool = _b("ALLOW_REAL_EXECUTION", False)  # 14.8: keep false until Section 12 passes
+    allow_real_execution: bool = _b("ALLOW_REAL_EXECUTION", False)  # 14.8
     scan_delay_seconds: float = _f("SCAN_DELAY_SECONDS", 0.5)
     daily_report_hour_utc: int = _i("DAILY_REPORT_HOUR_UTC", 17)   # 17 UTC = 23:00 Bangladesh
-    data_source: str = os.getenv("DATA_SOURCE", "synthetic").lower()  # quotex | csv | synthetic
+
+    # ---- Data source selection ----
+    #   otcharts  -> Quotex OTC data via otcharts API (RECOMMENDED, no Cloudflare)
+    #   quotex    -> pyquotex client (needs proxy+cookie on Render)
+    #   csv       -> offline CSV replay
+    #   synthetic -> deterministic fake data (smoke test only)
+    data_source: str = os.getenv("DATA_SOURCE", "synthetic").lower()
+
     csv_dir: str = os.getenv("CSV_DIR", "data")
 
     # ---- Server ----
@@ -182,4 +189,6 @@ def validate() -> List[str]:
         warnings.append("ASSET_WHITELIST empty -> bot will never trade (5.5).")
     if not settings.telegram_token or not settings.telegram_chat_id:
         warnings.append("Telegram token/chat id missing -> signals cannot be delivered.")
+    if settings.data_source == "otcharts" and not os.getenv("OTCHARTS_API_KEY", "").strip():
+        warnings.append("DATA_SOURCE=otcharts but OTCHARTS_API_KEY is empty -> bot will fail to fetch candles.")
     return warnings
