@@ -138,7 +138,7 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 class YFinanceSource(CandleSource):
-    """Free forex data via Yahoo Finance."""
+    """Free forex data via Yahoo Finance with browser impersonation (curl_cffi)."""
 
     SYMBOL_MAP = {
         "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
@@ -150,19 +150,33 @@ class YFinanceSource(CandleSource):
     def __init__(self):
         if yf is None:
             raise RuntimeError("yfinance not installed. Run: pip install yfinance")
+        # Create a browser-impersonating session once
+        try:
+            from curl_cffi import requests as curl_requests
+            self._session = curl_requests.Session(impersonate="chrome")
+            print("[YFinanceSource] Using curl_cffi browser impersonation")
+        except Exception:
+            self._session = None
+            print("[YFinanceSource] curl_cffi not available, using default requests")
 
     @classmethod
     def _map_asset(cls, asset: str) -> str:
         base = asset.lower().replace("_otc", "").replace("/", "").upper()
         return cls.SYMBOL_MAP.get(base, f"{base}=X")
 
+    def _download(self, symbol: str, period: str, interval: str):
+        kwargs = {"period": period, "interval": interval, "progress": False,
+                  "auto_adjust": False, "threads": False}
+        if self._session is not None:
+            kwargs["session"] = self._session
+        return yf.download(symbol, **kwargs)
+
     def get_candles(self, asset, tf_seconds, count, now=None):
         try:
             symbol = self._map_asset(asset)
             interval = tf_rule(tf_seconds).replace("min", "m").replace("1h", "60m").replace("4h", "1h")
             period = "5d" if tf_seconds <= 300 else "1mo"
-            df = yf.download(symbol, period=period, interval=interval,
-                             progress=False, auto_adjust=False, threads=False)
+            df = self._download(symbol, period, interval)
             if df is None or len(df) == 0:
                 return pd.DataFrame(columns=COLS)
             df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
@@ -183,13 +197,12 @@ class YFinanceSource(CandleSource):
             return pd.DataFrame(columns=COLS)
 
     def get_candles_peek(self, asset, tf_seconds, count, now=None):
-        """Like get_candles but INCLUDES the forming candle (for PREPARE alerts)."""
+        """Like get_candles but INCLUDES the forming candle."""
         try:
             symbol = self._map_asset(asset)
             interval = tf_rule(tf_seconds).replace("min", "m").replace("1h", "60m").replace("4h", "1h")
             period = "5d" if tf_seconds <= 300 else "1mo"
-            df = yf.download(symbol, period=period, interval=interval,
-                             progress=False, auto_adjust=False, threads=False)
+            df = self._download(symbol, period, interval)
             if df is None or len(df) == 0:
                 return pd.DataFrame(columns=COLS)
             df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
@@ -201,7 +214,6 @@ class YFinanceSource(CandleSource):
             df.index = pd.to_datetime(df.index, utc=True)
             df = df.sort_index()
             df = df[~df.index.duplicated(keep="last")]
-            # NOTE: no drop_unclosed — we want the forming candle
             return df.iloc[-count:]
         except Exception as e:
             print(f"[YFinanceSource] peek failed for {asset}: {e}")
