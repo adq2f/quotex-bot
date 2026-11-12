@@ -192,7 +192,7 @@ class Bot:
         else:
             self.tg.message(cap)
 
-    # ------------------------------------------------------------------ pre-scan (off)
+    # ------------------------------------------------------------------ pre-scan (off by default)
     def _pre_scan(self, now):
         cfg = self.cfg
         if cfg.prepare_alert_seconds <= 0: return
@@ -294,20 +294,52 @@ class Bot:
         self._htf = {}
         log("source_reconnected")
 
-    # ------------------------------------------------------------------ scan
+    # ------------------------------------------------------------------ scan (verbose)
     def scan(self, now):
         cfg = self.cfg
         if self.source is None:
-            self.diag["no_source"] += 1; return
-        if self.tracker.pending: return
+            self.diag["no_source"] += 1
+            log("scan_no_source")
+            return
+        if self.tracker.pending:
+            self.diag["pending_trade"] += 1
+            return
+
+        scan_started = time.time()
+        tried = 0
+        empty = 0
+        errors = 0
         cands = []
+
         for asset in cfg.whitelist:
+            tried += 1
             try:
                 m5, h1, h4 = self._frames(asset, now)
-                if len(m5) == 0: continue
+            except Exception as e:
+                errors += 1
+                self.diag["frames_exception"] += 1
+                log("scan_frames_error", asset=asset, error=str(e)[:200])
+                continue
+
+            if m5 is None or len(m5) == 0:
+                empty += 1
+                self.diag["empty_m5"] += 1
+                log("scan_empty_m5", asset=asset)
+                continue
+
+            if len(h1) < 50 or len(h4) < 50:
+                self.diag["short_htf"] += 1
+                log("scan_short_htf", asset=asset, h1=len(h1), h4=len(h4))
+                continue
+
+            try:
                 d = self.strategy.evaluate(asset, m5, h1, h4, now)
             except Exception as e:
-                log("scan_error", asset=asset, error=str(e)[:200]); continue
+                errors += 1
+                self.diag["evaluate_exception"] += 1
+                log("scan_eval_error", asset=asset, error=str(e)[:200])
+                continue
+
             gate = getattr(d, "gate", "") or ""
             self.diag[gate or d.decision] += 1
             payload = d.to_dict() if hasattr(d, "to_dict") else {
@@ -316,18 +348,28 @@ class Bot:
             self.store.log_decision(asset, d.decision, d.score, gate, payload)
             if d.decision != "HOLD":
                 cands.append((d, m5))
-        if not cands: return
+
+        elapsed = round(time.time() - scan_started, 1)
+        log("scan_completed", tried=tried, empty=empty, errors=errors,
+            candidates=len(cands), elapsed_sec=elapsed)
+
+        if not cands:
+            return
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
-            log("signal_stale", asset=d.asset, age=round(age, 1)); return
+            log("signal_stale", asset=d.asset, age=round(age, 1))
+            self.diag["stale_signal"] += 1
+            return
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
         d.payout_pct, d.risk_status = payout, status
         cu = self.risk.cooldown_active(now)
         d.cooldown = f"Active until {cu.strftime('%H:%M')} UTC" if cu else "Not active"
         if not ok:
-            log("risk_block", asset=d.asset, status=status); return
+            log("risk_block", asset=d.asset, status=status)
+            self.diag["risk_block"] += 1
+            return
         d.stake = self.risk.base_stake(d.asset, payout)
         entry_time = d.candle_close
         expiry = entry_time + timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
@@ -339,7 +381,8 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         self._send_signal(sig, m5)
-        log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=d.stake)
+        log("signal", id=sig.id, asset=d.asset, direction=d.decision,
+            score=d.score, stake=d.stake)
 
     # ------------------------------------------------------------------ reports
     def summary_numbers(self, since_iso=None):
