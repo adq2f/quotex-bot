@@ -9,14 +9,10 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-# ---- biquote import ----
-try:
-    import biquote as bq
-except Exception:
-    bq = None
+import requests
 
 COLS = ["open", "high", "low", "close", "volume"]
+BIQUOTE_BASE = "https://biquote.io/api"
 
 
 def utcnow() -> datetime:
@@ -44,6 +40,11 @@ def tf_rule(tf_seconds: int) -> str:
     return {60: "1min", 300: "5min", 900: "15min", 3600: "1h", 14400: "4h"}.get(tf_seconds, f"{tf_seconds}s")
 
 
+def tf_to_biquote(tf_seconds: int) -> str:
+    """biquote.io supports: 1m 5m 15m 30m 1h 4h 1d"""
+    return {60: "1m", 300: "5m", 900: "15m", 3600: "1h", 14400: "4h"}.get(tf_seconds, "1m")
+
+
 class CandleSource(ABC):
     @abstractmethod
     def get_candles(self, asset: str, tf_seconds: int, count: int, now: Optional[datetime] = None) -> pd.DataFrame: ...
@@ -66,9 +67,8 @@ class CandleSource(ABC):
 
 
 class BiQuoteSource(CandleSource):
-    """Forex/CFD OHLC data via biquote (no API key, MT5 feed)."""
+    """Forex/CFD OHLC via biquote.io REST API (no key, 15k req/min)."""
 
-    # Map Quotex OTC symbols to biquote symbols
     SYMBOL_MAP = {
         "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "USDJPY": "USDJPY",
         "AUDUSD": "AUDUSD", "USDCAD": "USDCAD", "USDCHF": "USDCHF",
@@ -78,38 +78,74 @@ class BiQuoteSource(CandleSource):
     }
 
     def __init__(self):
-        if bq is None:
-            raise RuntimeError("biquote not installed. Run: pip install biquote")
-        print("[BiQuoteSource] Using biquote (MT5 feed, no API key)")
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "quotex-signal-bot/1.0"})
+        print("[BiQuoteSource] Using biquote.io REST API (no package, no key)")
 
     @classmethod
     def _map_asset(cls, asset: str) -> str:
         base = asset.lower().replace("_otc", "").replace("/", "").upper()
         return cls.SYMBOL_MAP.get(base, base)
 
+    def _fetch_bars(self, symbol: str, interval: str, limit: int) -> list:
+        url = f"{BIQUOTE_BASE}/{symbol}/ohlc"
+        params = {"interval": interval, "limit": min(limit, 1000)}
+        r = self._session.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("bars", [])
+
     def get_candles(self, asset, tf_seconds, count, now=None):
         try:
             symbol = self._map_asset(asset)
-            interval = tf_rule(tf_seconds).replace("1min", "1m").replace("5min", "5m").replace("15min", "15m").replace("1h", "1h").replace("4h", "4h")
-            limit = min(count, 1000)  # biquote max ~1000 bars
-            bars = bq.ohlc(symbol, interval=interval, limit=limit)
+            interval = tf_to_biquote(tf_seconds)
+            bars = self._fetch_bars(symbol, interval, count)
             if not bars:
                 return pd.DataFrame(columns=COLS)
+
             df = pd.DataFrame(bars)
-            # biquote returns list of dicts with keys: time, open, high, low, close, tickVolume
-            if "time" in df.columns:
+            # biquote bars: openTime, open, high, low, close (newest-first)
+            if "openTime" in df.columns:
+                df.index = pd.to_datetime(df["openTime"], utc=True)
+            elif "time" in df.columns:
                 df.index = pd.to_datetime(df["time"], utc=True)
-            if "tickVolume" in df.columns:
-                df["volume"] = df["tickVolume"].astype(float)
             else:
+                return pd.DataFrame(columns=COLS)
+
+            if "volume" not in df.columns:
                 df["volume"] = 0.0
-            df = df[["open", "high", "low", "close", "volume"]].astype(float)
+            df = df[COLS].astype(float)
             df = df.sort_index()
             df = df[~df.index.duplicated(keep="last")]
             df = drop_unclosed(df, tf_seconds, now or utcnow())
             return df.iloc[-count:]
         except Exception as e:
             print(f"[BiQuoteSource] get_candles failed for {asset}: {e}")
+            return pd.DataFrame(columns=COLS)
+
+    def get_candles_peek(self, asset, tf_seconds, count, now=None):
+        """Like get_candles but INCLUDES the forming candle."""
+        try:
+            symbol = self._map_asset(asset)
+            interval = tf_to_biquote(tf_seconds)
+            bars = self._fetch_bars(symbol, interval, count)
+            if not bars:
+                return pd.DataFrame(columns=COLS)
+            df = pd.DataFrame(bars)
+            if "openTime" in df.columns:
+                df.index = pd.to_datetime(df["openTime"], utc=True)
+            elif "time" in df.columns:
+                df.index = pd.to_datetime(df["time"], utc=True)
+            else:
+                return pd.DataFrame(columns=COLS)
+            if "volume" not in df.columns:
+                df["volume"] = 0.0
+            df = df[COLS].astype(float)
+            df = df.sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+            return df.iloc[-count:]
+        except Exception as e:
+            print(f"[BiQuoteSource] peek failed for {asset}: {e}")
             return pd.DataFrame(columns=COLS)
 
     def get_payout(self, asset):
@@ -119,7 +155,6 @@ class BiQuoteSource(CandleSource):
         pass
 
 
-# Optional sources for future use (not active when DATA_SOURCE=biquote)
 class SyntheticSource(CandleSource):
     def get_candles(self, asset, tf_seconds, count, now=None):
         return pd.DataFrame(columns=COLS)
@@ -130,6 +165,6 @@ class SyntheticSource(CandleSource):
 
 def make_source(cfg, store=None) -> CandleSource:
     src = (cfg.data_source or "synthetic").lower().strip()
-    if src == "biquote":
+    if src in ("biquote", "yfinance"):
         return BiQuoteSource()
     return SyntheticSource()
