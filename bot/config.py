@@ -35,24 +35,14 @@ def _list(name: str, default: str = "") -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-# ============================================================
-# Quotex assets with 65%+ payout AND available on biquote.io
-# (removed: XTIUSD, USTECH100, GERMANY40, JAPAN225 — not on biquote)
-# ============================================================
 DEFAULT_WHITELIST = (
-    # ---- Major forex (93% payout) ----
     "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDUSD_otc,USDCAD_otc,USDCHF_otc,NZDUSD_otc,"
-    # ---- Cross forex (93% payout) ----
     "EURGBP_otc,EURJPY_otc,GBPJPY_otc,EURCHF_otc,AUDJPY_otc,CADJPY_otc,"
     "CHFJPY_otc,GBPCHF_otc,GBPAUD_otc,GBPCAD_otc,EURNZD_otc,AUDCAD_otc,"
     "AUDCHF_otc,AUDNZD_otc,NZDCAD_otc,NZDCHF_otc,NZDJPY_otc,EURAUD_otc,EURCAD_otc,"
-    # ---- High-payout exotics (65-94% payout) ----
     "USDINR_otc,USDBDT_otc,USDTHB_otc,USDSGD_otc,USDZAR_otc,"
-    # ---- Crypto (75-92% payout) ----
     "BTCUSD_otc,ETHUSD_otc,LTCUSD_otc,XRPUSD_otc,BCHUSD_otc,"
-    # ---- Commodities (70-85% payout) ----
     "XAUUSD_otc,XAGUSD_otc,"
-    # ---- Indices (only those biquote supports) ----
     "US500_otc,US30_otc,UK100_otc"
 )
 
@@ -73,7 +63,7 @@ class Settings:
     entry_tf_seconds: int = _i("ENTRY_TF_SECONDS", 300)
     bias_tf_seconds: Tuple[int, int] = (14400, 3600)
     expiry_candles: int = min(max(_i("EXPIRY_CANDLES", 1), 1), 2)
-    signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 10), 1), 30)
+    signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 30), 1), 60)
 
     strategy_mode: str = os.getenv("STRATEGY_MODE", "rulebook").lower()
     web_timeframe_seconds: int = _i("WEB_TIMEFRAME_SECONDS", 300)
