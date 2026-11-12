@@ -8,6 +8,5 @@ python-dotenv>=1.0
 # Turso Cloud Database
 libsql>=0.1.0
 
-# otcharts — Quotex OTC data without Cloudflare
-# (Replaces pyquotex + curl_cffi for signal-only mode)
-otcharts[pandas]>=0.4.0
+# Yahoo Finance — free forex data (no API key)
+yfinance>=0.2.40
