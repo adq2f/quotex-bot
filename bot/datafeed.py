@@ -67,23 +67,84 @@ class CandleSource(ABC):
 
 
 class BiQuoteSource(CandleSource):
-    """Forex/CFD OHLC via biquote.io REST API (no key, 15k req/min)."""
+    """
+    Forex/CFD/Crypto/Commodities/Indices OHLC via biquote.io REST API.
+    No API key, ~15,000 req/min allowed.
+    All Quotex assets with 65%+ payout are mapped here.
+    """
 
+    # ============================================================
+    # Full symbol map for biquote.io (65%+ payout Quotex assets)
+    # Keys = Quotex symbol without '_otc' suffix.
+    # Values = biquote.io ticker.
+    # ============================================================
     SYMBOL_MAP = {
-        "EURUSD": "EURUSD", "GBPUSD": "GBPUSD", "USDJPY": "USDJPY",
-        "AUDUSD": "AUDUSD", "USDCAD": "USDCAD", "USDCHF": "USDCHF",
-        "NZDUSD": "NZDUSD", "EURGBP": "EURGBP", "EURJPY": "EURJPY",
-        "GBPJPY": "GBPJPY", "XAUUSD": "XAUUSD", "BTCUSD": "BTCUSD",
+        # ---------- Major forex ----------
+        "EURUSD": "EURUSD",
+        "GBPUSD": "GBPUSD",
+        "USDJPY": "USDJPY",
+        "AUDUSD": "AUDUSD",
+        "USDCAD": "USDCAD",
+        "USDCHF": "USDCHF",
+        "NZDUSD": "NZDUSD",
+
+        # ---------- Cross forex ----------
+        "EURGBP": "EURGBP",
+        "EURJPY": "EURJPY",
+        "GBPJPY": "GBPJPY",
+        "EURCHF": "EURCHF",
+        "AUDJPY": "AUDJPY",
+        "CADJPY": "CADJPY",
+        "CHFJPY": "CHFJPY",
+        "GBPCHF": "GBPCHF",
+        "GBPAUD": "GBPAUD",
+        "GBPCAD": "GBPCAD",
+        "EURNZD": "EURNZD",
+        "AUDCAD": "AUDCAD",
+        "AUDCHF": "AUDCHF",
+        "AUDNZD": "AUDNZD",
+        "NZDCAD": "NZDCAD",
+        "NZDCHF": "NZDCHF",
+        "NZDJPY": "NZDJPY",
+        "EURAUD": "EURAUD",
+        "EURCAD": "EURCAD",
+
+        # ---------- High-payout exotics ----------
+        "USDINR": "USDINR",
+        "USDBDT": "USDBDT",
+        "USDTHB": "USDTHB",
+        "USDSGD": "USDSGD",
+        "USDZAR": "USDZAR",
+
+        # ---------- Crypto ----------
+        "BTCUSD": "BTCUSD",
         "ETHUSD": "ETHUSD",
+        "LTCUSD": "LTCUSD",
+        "XRPUSD": "XRPUSD",
+        "BCHUSD": "BCHUSD",
+
+        # ---------- Commodities ----------
+        "XAUUSD": "XAUUSD",   # Gold
+        "XAGUSD": "XAGUSD",   # Silver
+        "XTIUSD": "XTIUSD",   # WTI Oil
+
+        # ---------- Indices ----------
+        "US500": "US500",
+        "US30": "US30",
+        "USTECH100": "USTECH100",
+        "UK100": "UK100",
+        "GERMANY40": "GERMANY40",
+        "JAPAN225": "JAPAN225",
     }
 
     def __init__(self):
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "quotex-signal-bot/1.0"})
-        print("[BiQuoteSource] Using biquote.io REST API (no package, no key)")
+        print(f"[BiQuoteSource] Using biquote.io REST API — {len(self.SYMBOL_MAP)} symbols mapped")
 
     @classmethod
     def _map_asset(cls, asset: str) -> str:
+        """EURUSD_otc -> EURUSD. Unknown symbols pass through."""
         base = asset.lower().replace("_otc", "").replace("/", "").upper()
         return cls.SYMBOL_MAP.get(base, base)
 
@@ -95,32 +156,33 @@ class BiQuoteSource(CandleSource):
         data = r.json()
         return data.get("bars", [])
 
+    def _bars_to_df(self, bars: list, tf_seconds: int, count: int, drop_closed: bool) -> pd.DataFrame:
+        if not bars:
+            return pd.DataFrame(columns=COLS)
+        df = pd.DataFrame(bars)
+        if "openTime" in df.columns:
+            df.index = pd.to_datetime(df["openTime"], utc=True)
+        elif "time" in df.columns:
+            df.index = pd.to_datetime(df["time"], utc=True)
+        else:
+            return pd.DataFrame(columns=COLS)
+        if "volume" not in df.columns:
+            df["volume"] = 0.0
+        df = df[COLS].astype(float)
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep="last")]
+        if drop_closed:
+            df = drop_unclosed(df, tf_seconds, utcnow())
+        return df.iloc[-count:]
+
     def get_candles(self, asset, tf_seconds, count, now=None):
         try:
             symbol = self._map_asset(asset)
             interval = tf_to_biquote(tf_seconds)
             bars = self._fetch_bars(symbol, interval, count)
-            if not bars:
-                return pd.DataFrame(columns=COLS)
-
-            df = pd.DataFrame(bars)
-            # biquote bars: openTime, open, high, low, close (newest-first)
-            if "openTime" in df.columns:
-                df.index = pd.to_datetime(df["openTime"], utc=True)
-            elif "time" in df.columns:
-                df.index = pd.to_datetime(df["time"], utc=True)
-            else:
-                return pd.DataFrame(columns=COLS)
-
-            if "volume" not in df.columns:
-                df["volume"] = 0.0
-            df = df[COLS].astype(float)
-            df = df.sort_index()
-            df = df[~df.index.duplicated(keep="last")]
-            df = drop_unclosed(df, tf_seconds, now or utcnow())
-            return df.iloc[-count:]
+            return self._bars_to_df(bars, tf_seconds, count, drop_closed=True)
         except Exception as e:
-            print(f"[BiQuoteSource] get_candles failed for {asset}: {e}")
+            print(f"[BiQuoteSource] get_candles failed for {asset} ({symbol}): {e}")
             return pd.DataFrame(columns=COLS)
 
     def get_candles_peek(self, asset, tf_seconds, count, now=None):
@@ -129,23 +191,9 @@ class BiQuoteSource(CandleSource):
             symbol = self._map_asset(asset)
             interval = tf_to_biquote(tf_seconds)
             bars = self._fetch_bars(symbol, interval, count)
-            if not bars:
-                return pd.DataFrame(columns=COLS)
-            df = pd.DataFrame(bars)
-            if "openTime" in df.columns:
-                df.index = pd.to_datetime(df["openTime"], utc=True)
-            elif "time" in df.columns:
-                df.index = pd.to_datetime(df["time"], utc=True)
-            else:
-                return pd.DataFrame(columns=COLS)
-            if "volume" not in df.columns:
-                df["volume"] = 0.0
-            df = df[COLS].astype(float)
-            df = df.sort_index()
-            df = df[~df.index.duplicated(keep="last")]
-            return df.iloc[-count:]
+            return self._bars_to_df(bars, tf_seconds, count, drop_closed=False)
         except Exception as e:
-            print(f"[BiQuoteSource] peek failed for {asset}: {e}")
+            print(f"[BiQuoteSource] peek failed for {asset} ({symbol}): {e}")
             return pd.DataFrame(columns=COLS)
 
     def get_payout(self, asset):
