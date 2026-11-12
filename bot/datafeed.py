@@ -12,19 +12,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Monkey-patch for pyquotex compatibility with newer curl_cffi
+# ---- yfinance import (optional, won't crash if not installed) ----
 try:
-    from curl_cffi.requests.models import Response
-    if not hasattr(Response, 'reason_phrase'):
-        Response.reason_phrase = property(lambda self: getattr(self, 'status_code', 'Unknown'))
+    import yfinance as yf
 except Exception:
-    pass
-
-# ---- otcharts import (safe: won't crash if not installed yet) ----
-try:
-    from otcharts import Client as OTChartsClient
-except Exception:
-    OTChartsClient = None
+    yf = None
 
 COLS = ["open", "high", "low", "close", "volume"]
 
@@ -145,242 +137,100 @@ def load_csv(path: str) -> pd.DataFrame:
     return df[COLS].astype(float).sort_index()
 
 
-# --------------------------------------------------------------------------- otcharts (Cloudflare-free Quotex data)
-class OTChartsSource(CandleSource):
+# --------------------------------------------------------------------------- yfinance (FREE, no API key)
+class YFinanceSource(CandleSource):
     """
-    Reads Quotex OTC candles via the otcharts HTTP API.
-    No login, no browser, no Cloudflare, no cookie — just an API key.
-    Requires: pip install 'otcharts[pandas]'
-    Set env var OTCHARTS_API_KEY=otc_live_...
+    Free forex data via Yahoo Finance (yfinance).
+    Maps Quotex OTC symbols to Yahoo forex tickers:
+        EURUSD_otc -> EURUSD=X
+        GBPUSD_otc -> GBPUSD=X
+        USDJPY_otc -> USDJPY=X
+        XAUUSD_otc -> GC=F (gold futures)
+    No API key, no Cloudflare, no rate-limit issues in practice.
+    NOTE: real forex prices ≠ Quotex OTC prices, so signals are only for pipeline testing.
     """
 
-    QUOTEX_BOOK = "quotex"          # otcharts book name for Quotex
-    MAX_BARS    = 300               # API hard limit per request
+    SYMBOL_MAP = {
+        "EURUSD": "EURUSD=X",
+        "GBPUSD": "GBPUSD=X",
+        "USDJPY": "USDJPY=X",
+        "AUDUSD": "AUDUSD=X",
+        "USDCAD": "USDCAD=X",
+        "USDCHF": "USDCHF=X",
+        "NZDUSD": "NZDUSD=X",
+        "EURGBP": "EURGBP=X",
+        "EURJPY": "EURJPY=X",
+        "GBPJPY": "GBPJPY=X",
+        "XAUUSD": "GC=F",
+        "BTCUSD": "BTC-USD",
+        "ETHUSD": "ETH-USD",
+    }
 
     def __init__(self):
-        if OTChartsClient is None:
-            raise RuntimeError("otcharts not installed. Run: pip install 'otcharts[pandas]'")
-        api_key = os.getenv("OTCHARTS_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "OTCHARTS_API_KEY is not set. "
-                "Get a free key at https://otcharts.com/login and add it to Render env vars."
-            )
-        # Client() automatically picks up OTCHARTS_API_KEY from env,
-        # but we pass it explicitly for clarity / safety.
-        self.client = OTChartsClient(api_key=api_key)
-        print(f"[OTChartsSource] Connected to otcharts book='{self.QUOTEX_BOOK}'")
+        if yf is None:
+            raise RuntimeError("yfinance not installed. Run: pip install yfinance")
 
-    # ---- candles ----
+    @classmethod
+    def _map_asset(cls, asset: str) -> str:
+        base = asset.lower().replace("_otc", "").replace("/", "").upper()
+        return cls.SYMBOL_MAP.get(base, f"{base}=X")
+
     def get_candles(self, asset: str, tf_seconds: int, count: int, now=None):
-        """
-        asset: Quotex symbol, e.g. 'EURUSD_otc'
-        tf_seconds: e.g. 300 for M5
-        count: number of bars wanted (max 300)
-        """
         try:
-            tf_minutes = max(1, int(tf_seconds) // 60)
-            limit = min(int(count), self.MAX_BARS)
-
-            # otcharts returns a list of Bar objects:
-            #   bar.time (unix seconds), .open, .high, .low, .close, .volume
-            bars = self.client.candles(
-                self.QUOTEX_BOOK,       # venue
-                asset,                  # symbol, e.g. 'EURUSD_otc'
-                tf=tf_minutes,          # timeframe in minutes
-                limit=limit,
+            symbol = self._map_asset(asset)
+            interval = tf_rule(tf_seconds).replace("min", "m").replace("1h", "60m").replace("4h", "1h")
+            # yfinance max range per interval
+            period = "5d" if tf_seconds <= 300 else "1mo"
+            df = yf.download(
+                symbol, period=period, interval=interval,
+                progress=False, auto_adjust=False, threads=False,
             )
-
-            if not bars:
+            if df is None or len(df) == 0:
                 return pd.DataFrame(columns=COLS)
 
-            rows, index = [], []
-            for b in bars:
-                ts = getattr(b, "time", None)
-                if ts is None:
-                    continue
-                # otcharts .time is unix seconds (int/float)
-                idx = pd.Timestamp(ts, unit="s", tz="UTC") if isinstance(ts, (int, float)) else pd.Timestamp(ts)
-                if idx.tzinfo is None:
-                    idx = idx.tz_localize("UTC")
-                index.append(idx)
-                rows.append({
-                    "open":   float(b.open),
-                    "high":   float(b.high),
-                    "low":    float(b.low),
-                    "close":  float(b.close),
-                    "volume": float(getattr(b, "volume", 0.0) or 0.0),
-                })
+            # Normalize columns
+            df.columns = [c.lower() if isinstance(c, str) else c for c in df.columns]
+            if "adj close" in df.columns:
+                df = df.drop(columns=["adj close"])
+            rename = {"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
+            df = df.rename(columns=rename)
 
-            df = pd.DataFrame(rows, index=index)[COLS].sort_index()
+            if "volume" not in df.columns:
+                df["volume"] = 0.0
+
+            df = df[COLS].astype(float)
+            df.index = pd.to_datetime(df.index, utc=True)
+            df = df.sort_index()
             df = df[~df.index.duplicated(keep="last")]
 
-            # otcharts returns closed bars only, so drop_unclosed is unnecessary.
-            # But keep the last `count` bars to match the source contract.
-            return df.iloc[-limit:]
+            # If we resampled to a higher timeframe, do it now
+            if tf_seconds not in (60, 300, 900, 3600, 14400):
+                df = resample_ohlc(df, tf_rule(tf_seconds))
+
+            df = drop_unclosed(df, tf_seconds, now or utcnow())
+            return df.iloc[-count:]
 
         except Exception as e:
-            print(f"[OTChartsSource] get_candles failed for {asset}: {e}")
+            print(f"[YFinanceSource] get_candles failed for {asset}: {e}")
             return pd.DataFrame(columns=COLS)
 
-    # ---- optional: payout ----
     def get_payout(self, asset: str) -> Optional[float]:
-        """
-        otcharts free tier returns payout = null.
-        Lite+ plans may expose it. We return None so Bot falls back to
-        DEFAULT_PAYOUT_PCT (85) — already the case in main.py.
-        """
+        # yfinance doesn't provide binary-option payouts; use default 85%
         return None
-
-    # ---- not needed for signal_only ----
-    def get_balance(self) -> Optional[float]:
-        return None
-
-    def buy(self, asset, direction, stake, expiry_seconds):
-        raise NotImplementedError("otcharts is a data feed only — it cannot place trades.")
 
     def close(self) -> None:
-        # HTTP client — nothing to close
         pass
-
-
-# --------------------------------------------------------------------------- quotex (legacy, needs proxy+cookie on Render)
-class QuotexSource(CandleSource):
-    """Adapter around an unofficial async Quotex client (e.g. `pyquotex`)."""
-
-    def __init__(self, email: str, password: str, demo: bool = True,
-                 proxy: str = None, cookie: str = None):
-        try:
-            from pyquotex.stable_api import Quotex  # type: ignore
-        except Exception as e:
-            raise RuntimeError("Install pyquotex to use DATA_SOURCE=quotex") from e
-
-        self._email, self._password, self._proxy = email, password, proxy
-        self._loop = asyncio.new_event_loop()
-        self._t = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._t.start()
-        self.demo = demo
-
-        self.client = self._make_client(cookie)
-        ok, reason = self._run(self.client.connect())
-        if not ok:
-            raise RuntimeError(f"Quotex connect failed: {reason}")
-        self.client.change_account("PRACTICE" if demo else "REAL")
-
-    def _make_client(self, cookie: str):
-        from pyquotex.stable_api import Quotex  # type: ignore
-        if self._proxy:
-            print(f"[QuotexSource] Using proxy: {self._proxy}")
-            self.client = Quotex(email=self._email, password=self._password,
-                                 proxies={"http": self._proxy, "https": self._proxy})
-        else:
-            self.client = Quotex(email=self._email, password=self._password)
-        cookie_str = cookie if cookie is not None else os.getenv("QUOTEX_COOKIE", "")
-        if cookie_str:
-            print("[QuotexSource] Applying cookie...")
-            try:
-                self.client.set_session(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                               "AppleWebKit/537.36 (KHTML, like Gecko) "
-                               "Chrome/120.0.0.0 Safari/537.36",
-                    cookies=cookie_str,
-                )
-            except Exception as e:
-                print(f"[QuotexSource] Cookie apply failed: {e}")
-        return self.client
-
-    def reconnect(self, cookie: str = None):
-        try:
-            self._run(self.client.close())
-        except Exception:
-            pass
-        self.client = self._make_client(cookie)
-        ok, reason = self._run(self.client.connect())
-        if not ok:
-            raise RuntimeError(f"Quotex reconnect failed: {reason}")
-        self.client.change_account("PRACTICE" if self.demo else "REAL")
-        print("[QuotexSource] Reconnected successfully")
-
-    def _run(self, coro, timeout=20):
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
-
-    def get_candles(self, asset, tf_seconds, count, now=None):
-        now = now or utcnow()
-        end = int(now.timestamp())
-        raw = self._run(self.client.get_candles(asset, end, tf_seconds * count, tf_seconds)) or []
-        if not raw:
-            return pd.DataFrame(columns=COLS)
-        df = pd.DataFrame(raw)
-        df.index = pd.to_datetime(df["time"], unit="s", utc=True)
-        if "volume" not in df.columns:
-            df["volume"] = 0.0
-        df = df[COLS].astype(float).sort_index()
-        df = df[~df.index.duplicated(keep="last")]
-        return drop_unclosed(df, tf_seconds, now).iloc[-count:]
-
-    def get_payout(self, asset):
-        try:
-            p = self._run(self.client.get_payment())
-            v = p.get(asset, {}).get("payment") or p.get(asset, {}).get("turbo_payment")
-            return float(v) if v is not None else None
-        except Exception:
-            return None
-
-    def get_balance(self):
-        try:
-            return float(self._run(self.client.get_balance()))
-        except Exception:
-            return None
-
-    def get_all_payouts(self) -> dict:
-        try:
-            p = self._run(self.client.get_payment()) or {}
-            out = {}
-            for asset, info in p.items():
-                v = info.get("payment") or info.get("turbo_payment")
-                if v is not None:
-                    try:
-                        out[asset] = float(v)
-                    except Exception:
-                        pass
-            return out
-        except Exception:
-            return {}
-
-    def buy(self, asset, direction, stake, expiry_seconds):
-        status, _info = self._run(self.client.buy(stake, asset, direction.lower(), expiry_seconds))
-        return bool(status)
-
-    def close(self):
-        try:
-            self._run(self.client.close())
-        except Exception:
-            pass
 
 
 # --------------------------------------------------------------------------- factory
 def make_source(cfg, store=None) -> CandleSource:
-    """
-    Pick the data source based on cfg.data_source.
-    Priority order (set via DATA_SOURCE env var):
-      otcharts  -> OTChartsSource      (RECOMMENDED — no Cloudflare)
-      quotex    -> QuotexSource        (legacy, needs proxy+cookie on Render)
-      csv       -> CSVSource           (offline backtest)
-      synthetic -> SyntheticSource     (safe smoke test)
-    """
     src = (cfg.data_source or "synthetic").lower().strip()
 
-    if src == "otcharts":
-        return OTChartsSource()
-
-    if src == "quotex":
-        proxy = os.getenv("QUOTEX_PROXY", None)
-        cookie = (store.kv_get("quotex_cookie") if store else None) or os.getenv("QUOTEX_COOKIE", "")
-        return QuotexSource(cfg.quotex_email, cfg.quotex_password,
-                            demo=(cfg.account_type == "DEMO"),
-                            proxy=proxy, cookie=cookie)
+    if src == "yfinance":
+        return YFinanceSource()
 
     if src == "csv":
         return CSVSource(cfg.csv_dir)
 
+    # DEFAULT: synthetic (safe for smoke test)
     return SyntheticSource()
