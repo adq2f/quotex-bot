@@ -7,6 +7,3 @@ python-dotenv>=1.0
 
 # Turso Cloud Database
 libsql>=0.1.0
-
-# biquote — free forex/CFD OHLC data (no API key, MT5 feed)
-biquote>=0.1.0
