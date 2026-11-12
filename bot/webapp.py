@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask app: auth + dashboard + bot control + cookie input + keepalive."""
+"""webapp.py  --  Flask app with session auth + dashboard + bot control + settings API."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -27,11 +27,9 @@ def create_app(bot, controller: BotController) -> Flask:
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(here)
 
-    app = Flask(
-        __name__,
-        template_folder=os.path.join(root, "templates"),
-        static_folder=os.path.join(root, "static"),
-    )
+    app = Flask(__name__,
+                template_folder=os.path.join(root, "templates"),
+                static_folder=os.path.join(root, "static"))
     app.secret_key = os.getenv("SESSION_SECRET", secrets.token_hex(32))
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -45,11 +43,10 @@ def create_app(bot, controller: BotController) -> Flask:
         if not password:
             password = secrets.token_urlsafe(12)
             log("admin_seeded_random", username=username, password=password,
-                note="Set WEB_ADMIN_PASSWORD in env to control this. Shown once only.")
+                note="Set WEB_ADMIN_PASSWORD in env. Shown once only.")
         store.create_user(username, generate_password_hash(password))
         log("admin_created", username=username)
 
-    # ------------------------------------------------------------ public
     @app.get("/health")
     def health():
         return "ok", 200, {"Content-Type": "text/plain"}
@@ -59,7 +56,6 @@ def create_app(bot, controller: BotController) -> Flask:
         if request.method == "POST":
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
-            quotex_cookie = request.form.get("quotex_cookie", "").strip()
             user = store.get_user(username)
             if user and check_password_hash(user["password_hash"], password):
                 session.clear()
@@ -70,34 +66,18 @@ def create_app(bot, controller: BotController) -> Flask:
                 controller.on_login(session["sid"], username)
                 controller.touch_keepalive()
                 log("login_ok", username=username)
-
-                if quotex_cookie:
-                    store.kv_set("quotex_cookie", quotex_cookie)
-                    log("quotex_cookie_saved", length=len(quotex_cookie))
-                    try:
-                        bot.reconnect_source()
-                        flash("Bot reconnected with new Quotex cookie", "success")
-                    except Exception as e:
-                        log("reconnect_failed", error=str(e)[:300])
-                        flash(f"Cookie saved, but reconnect failed: {e}", "warning")
-
                 nxt = request.args.get("next") or url_for("dashboard")
-                if not nxt.startswith("/"):
-                    nxt = url_for("dashboard")
+                if not nxt.startswith("/"): nxt = url_for("dashboard")
                 return redirect(nxt)
             flash("Invalid username or password", "danger")
             log("login_fail", username=username)
-        existing_cookie = store.kv_get("quotex_cookie", "")
-        return render_template("login.html",
-                               existing_cookie=existing_cookie,
-                               has_cookie=bool(existing_cookie))
+        return render_template("login.html")
 
     @app.get("/logout")
     def logout():
         sid = session.get("sid")
         username = session.get("user")
-        if sid:
-            controller.on_logout(sid, username or "")
+        if sid: controller.on_logout(sid, username or "")
         log("logout", username=username or "")
         session.clear()
         return redirect(url_for("login"))
@@ -106,7 +86,6 @@ def create_app(bot, controller: BotController) -> Flask:
     def index():
         return redirect(url_for("dashboard") if session.get("user") else url_for("login"))
 
-    # ------------------------------------------------------------ authenticated
     @app.get("/dashboard")
     @_auth_required
     def dashboard():
@@ -116,7 +95,7 @@ def create_app(bot, controller: BotController) -> Flask:
     @app.get("/api/bot/status")
     @_auth_required
     def api_bot_status():
-        controller.touch_keepalive()          # every poll extends wake window
+        controller.touch_keepalive()
         now = datetime.now(timezone.utc)
         return jsonify({
             "controller": controller.status(),
@@ -127,7 +106,8 @@ def create_app(bot, controller: BotController) -> Flask:
             "whitelist": list(bot.cfg.whitelist),
             "summary": bot.summary_numbers(),
             "recent": store.list_signals(limit=20),
-            "has_cookie": bool(store.kv_get("quotex_cookie", "")),
+            "strategy_mode": bot.cfg.strategy_mode,
+            "timeframe_seconds": bot.cfg.entry_tf_seconds,
         })
 
     @app.post("/api/bot/start")
@@ -143,24 +123,33 @@ def create_app(bot, controller: BotController) -> Flask:
         controller.pause(reason=f"manual:{session.get('user')}")
         return jsonify({"ok": True, "status": controller.status()})
 
-    @app.post("/api/quotex/cookie")
+    # ---- settings API ----
+    @app.get("/api/settings")
     @_auth_required
-    def api_set_cookie():
-        """Update the Quotex cookie at runtime and reconnect."""
-        controller.touch_keepalive()
-        cookie = (request.json or {}).get("cookie", "").strip()
-        if not cookie:
-            return jsonify({"ok": False, "error": "cookie is empty"}), 400
-        store.kv_set("quotex_cookie", cookie)
-        log("quotex_cookie_updated", length=len(cookie))
-        try:
-            bot.reconnect_source()
-            return jsonify({"ok": True, "message": "Cookie saved and bot reconnected"})
-        except Exception as e:
-            log("reconnect_failed", error=str(e)[:300])
-            return jsonify({"ok": False, "error": str(e)}), 500
+    def api_get_settings():
+        return jsonify({
+            "strategy_mode": store.get_setting("strategy_mode", bot.cfg.strategy_mode),
+            "web_timeframe_seconds": int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds)),
+        })
 
-    # ------------------------------------------------------------ legacy JSON
+    @app.post("/api/settings")
+    @_auth_required
+    def api_set_settings():
+        data = request.get_json() or {}
+        mode = data.get("strategy_mode")
+        tf = data.get("web_timeframe_seconds")
+        if mode and mode not in ("rulebook", "quick", "news"):
+            return jsonify({"error": "invalid strategy_mode"}), 400
+        if tf and int(tf) not in (60, 300, 900, 3600):
+            return jsonify({"error": "invalid web_timeframe_seconds"}), 400
+        if mode: store.set_setting("strategy_mode", mode)
+        if tf: store.set_setting("web_timeframe_seconds", int(tf))
+        bot._build_strategy()
+        return jsonify({"ok": True, "applied": {
+            "strategy_mode": store.get_setting("strategy_mode", bot.cfg.strategy_mode),
+            "web_timeframe_seconds": int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds)),
+        }})
+
     @app.get("/stats")
     @_auth_required
     def stats():
@@ -172,6 +161,8 @@ def create_app(bot, controller: BotController) -> Flask:
             "mode": bot.cfg.execution_mode,
             "account": bot.cfg.account_type,
             "mtg_enabled": bot.cfg.mtg_enabled,
+            "strategy_mode": bot.cfg.strategy_mode,
+            "entry_tf_seconds": bot.cfg.entry_tf_seconds,
             "summary": bot.summary_numbers(),
         })
 
