@@ -37,7 +37,17 @@ class Bot:
     def __init__(self, cfg=settings, source=None, telegram=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
-        self.source = source or make_source(cfg, self.store)
+
+        # ---- FIX: lazy + safe source init (Cloudflare 403 won't kill Flask) ----
+        self.source = source
+        if self.source is None:
+            try:
+                self.source = make_source(cfg, self.store)
+                log("source_initialized")
+            except Exception as e:
+                log("source_init_failed", error=str(e)[:300])
+                self.source = None
+
         self.tg = telegram or Telegram(cfg)
         self.news = NewsFilter(cfg) if cfg.news_enabled else None
         self.strategy = Strategy(cfg, self.news)
@@ -51,6 +61,7 @@ class Bot:
         self.stop_event = threading.Event()
         os.makedirs(cfg.charts_dir, exist_ok=True)
 
+    # ------------------------------------------------------------------ helpers
     def _tz(self) -> int:
         return self.cfg.display_utc_offset_hours
 
@@ -66,6 +77,10 @@ class Bot:
 
     def _frames(self, asset: str, now: datetime):
         cfg = self.cfg
+        # ---- FIX: guard when source is None ----
+        if self.source is None:
+            empty = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            return empty, empty, empty
         m5 = self.source.get_candles(asset, cfg.entry_tf_seconds, 300, now)
         out = []
         for tf in cfg.bias_tf_seconds[::-1]:
@@ -77,6 +92,8 @@ class Bot:
         return m5, out[0], out[1]
 
     def _payout(self, asset: str) -> float:
+        if self.source is None:
+            return self.cfg.default_payout_pct
         p = self.source.get_payout(asset)
         return float(p) if p else self.cfg.default_payout_pct
 
@@ -85,9 +102,11 @@ class Bot:
         if s is None:
             return {}
         t = lambda i: m5.index[i].isoformat() if i is not None and 0 <= i < len(m5) else None
-        return {"zone": list(s.zone), "ob": list(s.ob), "ob_time": t(s.ob_idx), "fvg": list(s.fvg) if s.fvg else None,
+        return {"zone": list(s.zone), "ob": list(s.ob), "ob_time": t(s.ob_idx),
+                "fvg": list(s.fvg) if s.fvg else None,
                 "fvg_time": t(s.fvg_idx), "sweep_level": s.sweep_level, "sweep_time": t(s.sweep_idx)}
 
+    # ------------------------------------------------------------------ sending
     def _send_signal(self, sig: Signal, m5: pd.DataFrame, section9: Optional[str]):
         path = os.path.join(self.cfg.charts_dir, f"sig_{sig.id}.png")
         info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step,
@@ -122,17 +141,25 @@ class Bot:
             path = ""
         icon = {"WIN": "✅", "LOSS": "❌", "DRAW": "➖"}.get(outcome, "")
         cap = (f"{icon} <b>{outcome}</b>  {sig.asset}  {'MTG%d ' % sig.step if sig.step else ''}\n"
-               f"P/L: <b>{('+$%.2f' % pnl) if pnl > 0 else (('-$%.2f' % abs(pnl)) if pnl < 0 else '$0.00')}</b>   Balance: ${self.risk.balance:.2f}\n"
+               f"P/L: <b>{('+$%.2f' % pnl) if pnl > 0 else (('-$%.2f' % abs(pnl)) if pnl < 0 else '$0.00')}</b>"
+               f"   Balance: ${self.risk.balance:.2f}\n"
                f"Entry {sig.entry_price:.5f} → Exit {sig.exit_price:.5f}   ID: {sig.id}")
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
             self.tg.message(cap)
 
+    # ------------------------------------------------------------------ resolve (+ MTG)
     def resolve_due(self, now: datetime):
         cfg = self.cfg
+        if self.source is None:
+            return
         for sig in self.tracker.due(now):
-            m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 120, now)
+            try:
+                m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 120, now)
+            except Exception as e:
+                log("resolve_fetch_failed", id=sig.id, error=str(e)[:200])
+                continue
             exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)
             if exp not in m5.index:
                 sig.tries += 1
@@ -155,7 +182,7 @@ class Bot:
 
     def _try_mtg(self, sig: Signal, now: datetime):
         cfg = self.cfg
-        if not cfg.mtg_enabled or sig.step >= cfg.mtg_max_steps:
+        if self.source is None or not cfg.mtg_enabled or sig.step >= cfg.mtg_max_steps:
             return
         m5, h1, h4 = self._frames(sig.asset, now)
         ok, why = self.strategy.mtg_precheck(sig.asset, sig.direction, m5, h1, h4, now)
@@ -190,22 +217,30 @@ class Bot:
         """Rebuild data source with the latest cookie and reset HTF cache."""
         from bot.datafeed import make_source
         try:
-            self.source.close()
+            if self.source is not None:
+                self.source.close()
         except Exception:
             pass
+        # May raise if Cloudflare still blocks — caller should catch and show error to user
         self.source = make_source(self.cfg, self.store)
         self.executor.source = self.source
         self._htf = {}
         log("source_reconnected")
 
+    # ------------------------------------------------------------------ scan
     def scan(self, now: datetime):
         cfg = self.cfg
+        if self.source is None:
+            self.diag["no_source"] += 1
+            return
         if self.tracker.pending:
             return
         cands = []
         for asset in cfg.whitelist:
             try:
                 m5, h1, h4 = self._frames(asset, now)
+                if len(m5) == 0:
+                    continue
                 d = self.strategy.evaluate(asset, m5, h1, h4, now)
             except Exception as e:
                 log("scan_error", asset=asset, error=str(e)[:200])
@@ -246,8 +281,10 @@ class Bot:
         self._send_signal(sig, m5, section9_text(d, self._tz(), self._expiry_text()))
         log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=d.stake)
 
+    # ------------------------------------------------------------------ reports
     def summary_numbers(self, since_iso: Optional[str] = None) -> Dict:
         rows = self.store.signal_rows(since_iso)
+
         def agg(rs):
             w = sum(r["status"] == "WIN" for r in rs)
             l = sum(r["status"] == "LOSS" for r in rs)
@@ -257,6 +294,7 @@ class Bot:
                     "win_rate": round(100 * w / (w + l), 1) if (w + l) else None,
                     "profit_factor": round(gp / gl, 2) if gl else None,
                     "pnl": round(sum(r["pnl"] for r in rs), 2)}
+
         return {"all": agg(rows),
                 "base": agg([r for r in rows if r["step"] == 0]),
                 "mtg": agg([r for r in rows if r["step"] > 0])}
@@ -268,14 +306,26 @@ class Bot:
             return
         self.store.kv_set("last_report", today)
         s = self.summary_numbers(today)
+
         def line(n, a):
-            return f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}"
-        txt = (f"📈 <b>Daily report {today}</b>\n{line('Total', s['all'])}\n{line('Base', s['base'])}\n{line('MTG ', s['mtg'])}\n"
-               f"Balance: ${self.risk.balance:.2f}   Top blocker: {self.diag.most_common(1)[0][0] if self.diag else '-'}")
+            return (f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  "
+                    f"WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}")
+
+        txt = (f"📈 <b>Daily report {today}</b>\n{line('Total', s['all'])}\n"
+               f"{line('Base', s['base'])}\n{line('MTG ', s['mtg'])}\n"
+               f"Balance: ${self.risk.balance:.2f}   "
+               f"Top blocker: {self.diag.most_common(1)[0][0] if self.diag else '-'}")
         self.tg.message(txt)
 
+    # ------------------------------------------------------------------ loop
     def cycle(self, now: Optional[datetime] = None):
         now = now or utcnow()
+        # ---- FIX: skip source-dependent work when source is None ----
+        if self.source is None:
+            self.diag["no_source"] += 1
+            self.daily_report(now)
+            cleanup_old(self.cfg.charts_dir)
+            return
         if self.cfg.execution_mode == "execute":
             b = self.source.get_balance()
             if b:
@@ -290,12 +340,22 @@ class Bot:
         tf = self.cfg.entry_tf_seconds
         for w in validate():
             log("config_warning", msg=w)
-        self.tg.message(
-            "🤖 Bot thread online | mode: %s | account: %s | MTG: %s | assets: %s\n"
-            "⏸ Waiting for web login to begin scanning." %
-            (self.cfg.execution_mode, self.cfg.account_type,
-             "ON" if self.cfg.mtg_enabled else "OFF", ", ".join(self.cfg.whitelist))
-        )
+
+        if self.source is None:
+            self.tg.message(
+                "⚠️ Bot thread online BUT Quotex source is not connected.\n"
+                "Reason: Cloudflare 403 or invalid credentials.\n"
+                "→ Open the web dashboard, log in, and paste a fresh Quotex cookie.\n"
+                "→ Or set QUOTEX_PROXY in Render env vars."
+            )
+        else:
+            self.tg.message(
+                "🤖 Bot thread online | mode: %s | account: %s | MTG: %s | assets: %s\n"
+                "⏸ Waiting for web login to begin scanning." %
+                (self.cfg.execution_mode, self.cfg.account_type,
+                 "ON" if self.cfg.mtg_enabled else "OFF", ", ".join(self.cfg.whitelist))
+            )
+
         log("bot_loop_started")
         while not self.stop_event.is_set():
             now = time.time()
