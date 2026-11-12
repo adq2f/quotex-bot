@@ -1,15 +1,9 @@
 """
-main.py  --  entry point (Section 10/11). Flask health server runs in the MAIN thread (so Render sees a web
-service and UptimeRobot can ping /health); the trading loop runs in a daemon thread.
-
-FIX LOG v2.3:
-  - Added sys.path fix at the top to resolve ModuleNotFoundError for 'bot' package on Render.
-  - Fixed app.run port binding to correctly use Render's dynamic PORT environment variable.
+main.py  --  entry point. Flask web app + bot thread (paused until web login).
 """
 import sys
 import os
 
-# FIX: Force Python to look in the current directory so 'bot' package is found on Render
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import threading
@@ -24,7 +18,6 @@ from bot.chart import cleanup_old, render_result_chart, render_signal_chart
 from bot.config import settings, validate
 from bot.datafeed import make_source
 from bot.executor import Executor
-from bot.health import create_app
 from bot.logger import log
 from bot.news import NewsFilter
 from bot.risk import RiskManager
@@ -32,6 +25,8 @@ from bot.store import Store
 from bot.strategy import Decision, Strategy, section9_text
 from bot.telegram_out import Telegram
 from bot.tracker import Signal, Tracker, outcome_for, pnl_for
+from bot.controller import BotController
+from bot.webapp import create_app
 
 
 def utcnow() -> datetime:
@@ -51,9 +46,11 @@ class Bot:
         self.executor = Executor(cfg, self.source)
         self.diag: Counter = Counter()
         self._htf: Dict[tuple, pd.DataFrame] = {}
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+        self.stop_event  = threading.Event()
         os.makedirs(cfg.charts_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------ helpers
     def _tz(self) -> int:
         return self.cfg.display_utc_offset_hours
 
@@ -71,7 +68,7 @@ class Bot:
         cfg = self.cfg
         m5 = self.source.get_candles(asset, cfg.entry_tf_seconds, 300, now)
         out = []
-        for tf in cfg.bias_tf_seconds[::-1]:                       # (H1, H4)
+        for tf in cfg.bias_tf_seconds[::-1]:
             key = (asset, tf, int(now.timestamp() // tf))
             if key not in self._htf:
                 self._htf = {k: v for k, v in self._htf.items() if not (k[0] == asset and k[1] == tf)}
@@ -91,7 +88,6 @@ class Bot:
         return {"zone": list(s.zone), "ob": list(s.ob), "ob_time": t(s.ob_idx), "fvg": list(s.fvg) if s.fvg else None,
                 "fvg_time": t(s.fvg_idx), "sweep_level": s.sweep_level, "sweep_time": t(s.sweep_idx)}
 
-    # ------------------------------------------------------------------ sending
     def _send_signal(self, sig: Signal, m5: pd.DataFrame, section9: Optional[str]):
         path = os.path.join(self.cfg.charts_dir, f"sig_{sig.id}.png")
         info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step, "tf_seconds": sig.tf_seconds,
@@ -132,12 +128,11 @@ class Bot:
         else:
             self.tg.message(cap)
 
-    # ------------------------------------------------------------------ resolve (+ MTG)
     def resolve_due(self, now: datetime):
         cfg = self.cfg
         for sig in self.tracker.due(now):
             m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 120, now)
-            exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)    # open time of expiry candle
+            exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)
             if exp not in m5.index:
                 sig.tries += 1
                 if sig.tries >= 3:
@@ -187,10 +182,9 @@ class Bot:
         self._send_signal(ms, m5, None)
         log("mtg_signal", id=ms.id, parent=sig.id, stake=stake)
 
-    # ------------------------------------------------------------------ scan
     def scan(self, now: datetime):
         cfg = self.cfg
-        if self.tracker.pending:                                    # 6.7 max 1 concurrent trade
+        if self.tracker.pending:
             return
         cands = []
         for asset in cfg.whitelist:
@@ -208,7 +202,7 @@ class Bot:
             return
         d, m5 = max(cands, key=lambda x: x[0].score)
         age = (utcnow() - d.candle_close).total_seconds()
-        if age > cfg.signal_max_age_seconds:                         # 15.3
+        if age > cfg.signal_max_age_seconds:
             log("signal_stale", asset=d.asset, age=round(age, 1))
             self.diag["stale_signal"] += 1
             return
@@ -233,7 +227,6 @@ class Bot:
         self._send_signal(sig, m5, section9_text(d, self._tz(), self._expiry_text()))
         log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=d.stake)
 
-    # ------------------------------------------------------------------ reports
     def summary_numbers(self, since_iso: Optional[str] = None) -> Dict:
         rows = self.store.signal_rows(since_iso)
         def agg(rs):
@@ -256,7 +249,6 @@ class Bot:
                f"Balance: ${self.risk.balance:.2f}   Top blocker: {self.diag.most_common(1)[0][0] if self.diag else '-'}")
         self.tg.message(txt)
 
-    # ------------------------------------------------------------------ loop
     def cycle(self, now: Optional[datetime] = None):
         now = now or utcnow()
         if self.cfg.execution_mode == "execute":
@@ -264,7 +256,8 @@ class Bot:
             if b:
                 self.risk.set_balance(b)
         self.resolve_due(now)
-        self.scan(now)
+        if not self.pause_event.is_set():
+            self.scan(now)
         self.daily_report(now)
         cleanup_old(self.cfg.charts_dir)
 
@@ -272,24 +265,32 @@ class Bot:
         tf = self.cfg.entry_tf_seconds
         for w in validate():
             log("config_warning", msg=w)
-        self.tg.message("🤖 Bot started | mode: %s | account: %s | MTG: %s | assets: %s" %
-                        (self.cfg.execution_mode, self.cfg.account_type, "ON" if self.cfg.mtg_enabled else "OFF", ", ".join(self.cfg.whitelist)))
-        while True:
+        self.tg.message(
+            "🤖 Bot thread online | mode: %s | account: %s | MTG: %s | assets: %s\n"
+            "⏸ Waiting for web login to begin scanning." %
+            (self.cfg.execution_mode, self.cfg.account_type,
+             "ON" if self.cfg.mtg_enabled else "OFF", ", ".join(self.cfg.whitelist))
+        )
+        log("bot_loop_started")
+        while not self.stop_event.is_set():
             now = time.time()
             nxt = (int(now // tf) + 1) * tf + self.cfg.scan_delay_seconds
-            time.sleep(max(0.0, nxt - now))
+            while time.time() < nxt and not self.stop_event.is_set():
+                time.sleep(min(1.0, max(0.0, nxt - time.time())))
+            if self.stop_event.is_set():
+                break
             try:
                 self.cycle()
             except Exception as e:
                 log("cycle_error", error=str(e)[:300])
+        log("bot_loop_exited")
 
 
 def main():
     bot = Bot()
-    threading.Thread(target=bot.run_forever, daemon=True).start()
-    app = create_app(bot)
-    
-    # FIX: Use Render's assigned PORT environment variable
+    controller = BotController(bot)
+    controller.start_thread()
+    app = create_app(bot, controller)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
