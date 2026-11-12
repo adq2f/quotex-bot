@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask: auth + dashboard + bot control + timeframe API."""
+"""webapp.py  --  Flask: auth + dashboard + bot control + diagnostics."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -47,6 +47,7 @@ def create_app(bot, controller: BotController) -> Flask:
         store.create_user(username, generate_password_hash(password))
         log("admin_created", username=username)
 
+    # ------------------------------------------------------------ public
     @app.get("/health")
     def health():
         return "ok", 200, {"Content-Type": "text/plain"}
@@ -67,7 +68,8 @@ def create_app(bot, controller: BotController) -> Flask:
                 controller.touch_keepalive()
                 log("login_ok", username=username)
                 nxt = request.args.get("next") or url_for("dashboard")
-                if not nxt.startswith("/"): nxt = url_for("dashboard")
+                if not nxt.startswith("/"):
+                    nxt = url_for("dashboard")
                 return redirect(nxt)
             flash("Invalid username or password", "danger")
         return render_template("login.html")
@@ -76,7 +78,8 @@ def create_app(bot, controller: BotController) -> Flask:
     def logout():
         sid = session.get("sid")
         username = session.get("user")
-        if sid: controller.on_logout(sid, username or "")
+        if sid:
+            controller.on_logout(sid, username or "")
         session.clear()
         return redirect(url_for("login"))
 
@@ -84,6 +87,7 @@ def create_app(bot, controller: BotController) -> Flask:
     def index():
         return redirect(url_for("dashboard") if session.get("user") else url_for("login"))
 
+    # ------------------------------------------------------------ authenticated
     @app.get("/dashboard")
     @_auth_required
     def dashboard():
@@ -143,6 +147,60 @@ def create_app(bot, controller: BotController) -> Flask:
             "web_timeframe_seconds": int(tf),
             "strategy_mode": strategy_for_timeframe(int(tf)),
         }})
+
+    # ------------------------------------------------------------ diagnostics
+    @app.get("/api/test/scan")
+    @_auth_required
+    def api_test_scan():
+        """Manual diagnostic — tests ONE asset end-to-end and returns details."""
+        asset = request.args.get("asset") or (bot.cfg.whitelist[0] if bot.cfg.whitelist else "EURUSD_otc")
+        now = datetime.now(timezone.utc)
+        result = {
+            "asset": asset,
+            "source_class": type(bot.source).__name__ if bot.source else None,
+            "data_source_setting": bot.cfg.data_source,
+            "whitelist_count": len(bot.cfg.whitelist),
+            "entry_tf_seconds": bot.cfg.entry_tf_seconds,
+            "strategy": bot.cfg.strategy_mode,
+        }
+        try:
+            if bot.source is None:
+                result["error"] = "source is None (init failed)"
+                return jsonify(result)
+
+            # test raw get_candles for each timeframe
+            for name, tf_sec in [("m_entry", bot.cfg.entry_tf_seconds), ("h1", 3600), ("h4", 14400)]:
+                try:
+                    df = bot.source.get_candles(asset, tf_sec, 300, now)
+                    rows = len(df) if df is not None else 0
+                    result[f"{name}_rows"] = rows
+                    if rows > 0:
+                        result[f"{name}_last_time"] = str(df.index[-1])
+                        result[f"{name}_last_close"] = float(df["close"].iloc[-1])
+                    else:
+                        result[f"{name}_empty"] = True
+                except Exception as e:
+                    result[f"{name}_exception"] = str(e)[:250]
+
+            # try full evaluate
+            try:
+                m5, h1, h4 = bot._frames(asset, now)
+                result["frames_lengths"] = {"m5": len(m5), "h1": len(h1), "h4": len(h4)}
+                if len(m5) > 0 and len(h1) >= 50 and len(h4) >= 50:
+                    d = bot.strategy.evaluate(asset, m5, h1, h4, now)
+                    result["evaluate_ok"] = True
+                    result["decision"] = d.decision
+                    result["score"] = d.score
+                    result["gate"] = getattr(d, "gate", "")
+                    result["notes"] = getattr(d, "notes", "")
+                else:
+                    result["evaluate_skipped"] = "not enough candles"
+            except Exception as e:
+                result["evaluate_error"] = str(e)[:300]
+
+        except Exception as e:
+            result["error"] = str(e)[:300]
+        return jsonify(result)
 
     @app.get("/stats")
     @_auth_required
