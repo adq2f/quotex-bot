@@ -20,6 +20,8 @@
             $('mode').textContent    = d.mode;
             $('account').textContent = d.account;
             $('mtg').textContent     = d.mtg_enabled ? 'ON' : 'OFF';
+            $('strat').textContent   = d.strategy_mode || '—';
+            $('tf').textContent      = d.timeframe_seconds ? d.timeframe_seconds + 's' : '—';
             $('assets').textContent  = (d.whitelist || []).join(', ');
 
             const rk = d.risk || {};
@@ -78,6 +80,46 @@
         $('btn-start').onclick   = () => post('/api/bot/start');
         $('btn-stop').onclick    = () => post('/api/bot/stop');
         $('btn-refresh').onclick = refresh;
+
+        // Load current settings
+        fetch('/api/settings', { credentials: 'same-origin' })
+            .then(r => r.json())
+            .then(s => {
+                if (s.strategy_mode) $('sel-strategy').value = s.strategy_mode;
+                if (s.web_timeframe_seconds) $('sel-timeframe').value = String(s.web_timeframe_seconds);
+            })
+            .catch(() => {});
+
+        // Apply settings
+        $('btn-apply-settings').onclick = async () => {
+            const body = {
+                strategy_mode: $('sel-strategy').value,
+                web_timeframe_seconds: parseInt($('sel-timeframe').value, 10),
+            };
+            const el = $('settings-status');
+            el.textContent = 'Applying…'; el.className = 'small text-secondary';
+            try {
+                const r = await fetch('/api/settings', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const j = await r.json();
+                if (r.ok) {
+                    el.textContent = `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds}s`;
+                    el.className = 'small text-success';
+                    setTimeout(() => { el.textContent = ''; }, 5000);
+                } else {
+                    el.textContent = j.error || 'Failed';
+                    el.className = 'small text-danger';
+                }
+            } catch (e) {
+                el.textContent = 'Network error';
+                el.className = 'small text-danger';
+            }
+            refresh();
+        };
+
         refresh();
         setInterval(refresh, 5000);
     });
