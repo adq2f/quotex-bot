@@ -3,11 +3,27 @@
     const fmtMoney = (v) => v == null ? '—' : (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+    const TF_TO_STRATEGY = {
+        "60":   "quick",
+        "300":  "rulebook",
+        "900":  "rulebook",
+        "3600": "rulebook",
+    };
+    const STRATEGY_LABEL = {
+        "quick":    "Quick M1 (EMA+RSI+MACD+BB+Stoch)",
+        "rulebook": "Rulebook (SMC)",
+    };
+
     function statusPill(st) {
         const pill = $('bot-status-pill');
         if (!st.controller.started) { pill.className = 'badge bg-danger fs-6'; pill.textContent = '⛔ Thread dead'; return; }
         if (st.controller.paused)   { pill.className = 'badge bg-warning text-dark fs-6'; pill.textContent = '⏸ Paused'; return; }
         pill.className = 'badge bg-success fs-6'; pill.textContent = '🟢 Running';
+    }
+
+    function updateStrategyLabel(tf) {
+        const strat = TF_TO_STRATEGY[String(tf)] || "rulebook";
+        $('lbl-strategy').textContent = STRATEGY_LABEL[strat] || strat;
     }
 
     async function refresh() {
@@ -20,9 +36,7 @@
             $('mode').textContent    = d.mode;
             $('account').textContent = d.account;
             $('mtg').textContent     = d.mtg_enabled ? 'ON' : 'OFF';
-            $('strat').textContent   = d.strategy_mode || '—';
-            $('tf').textContent      = d.timeframe_seconds ? d.timeframe_seconds + 's' : '—';
-            $('assets').textContent  = (d.whitelist || []).join(', ');
+            $('asset-count').textContent = (d.whitelist || []).length;
 
             const rk = d.risk || {};
             $('r-balance').textContent = '$' + (rk.balance ?? 0).toFixed(2);
@@ -81,21 +95,22 @@
         $('btn-stop').onclick    = () => post('/api/bot/stop');
         $('btn-refresh').onclick = refresh;
 
-        // Load current settings
+        $('sel-timeframe').addEventListener('change', () => {
+            updateStrategyLabel($('sel-timeframe').value);
+        });
+
         fetch('/api/settings', { credentials: 'same-origin' })
             .then(r => r.json())
             .then(s => {
-                if (s.strategy_mode) $('sel-strategy').value = s.strategy_mode;
-                if (s.web_timeframe_seconds) $('sel-timeframe').value = String(s.web_timeframe_seconds);
+                if (s.web_timeframe_seconds) {
+                    $('sel-timeframe').value = String(s.web_timeframe_seconds);
+                    updateStrategyLabel(s.web_timeframe_seconds);
+                }
             })
             .catch(() => {});
 
-        // Apply settings
         $('btn-apply-settings').onclick = async () => {
-            const body = {
-                strategy_mode: $('sel-strategy').value,
-                web_timeframe_seconds: parseInt($('sel-timeframe').value, 10),
-            };
+            const body = { web_timeframe_seconds: parseInt($('sel-timeframe').value, 10) };
             const el = $('settings-status');
             el.textContent = 'Applying…'; el.className = 'small text-secondary';
             try {
@@ -106,8 +121,9 @@
                 });
                 const j = await r.json();
                 if (r.ok) {
-                    el.textContent = `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds}s`;
+                    el.textContent = `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds / 60}min`;
                     el.className = 'small text-success';
+                    updateStrategyLabel(j.applied.web_timeframe_seconds);
                     setTimeout(() => { el.textContent = ''; }, 5000);
                 } else {
                     el.textContent = j.error || 'Failed';
