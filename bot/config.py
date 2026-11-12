@@ -1,5 +1,5 @@
 """
-config.py  --  Rulebook settings, timeframe→strategy lock, all-settings.
+config.py  --  Rulebook settings, timeframe→strategy lock, full asset list.
 """
 import os
 from dataclasses import dataclass, field
@@ -35,13 +35,25 @@ def _list(name: str, default: str = "") -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
-# All yfinance-supported Quotex symbols
+# ============================================================
+# All Quotex assets with 65%+ payout
+# (majors, crosses, high-payout exotics, crypto, commodities, indices)
+# ============================================================
 DEFAULT_WHITELIST = (
-    "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDUSD_otc,USDCAD_otc,USDCHF_otc,"
-    "NZDUSD_otc,EURGBP_otc,EURJPY_otc,GBPJPY_otc,EURCHF_otc,AUDCAD_otc,"
-    "AUDCHF_otc,AUDJPY_otc,CADJPY_otc,CHFJPY_otc,EURAUD_otc,EURCAD_otc,"
-    "GBPAUD_otc,GBPCAD_otc,GBPCHF_otc,NZDCAD_otc,NZDCHF_otc,NZDJPY_otc,"
-    "EURNZD_otc,GBPNZD_otc,AUDNZD_otc,CADCHF_otc,XAUUSD_otc,BTCUSD_otc,ETHUSD_otc"
+    # ---- Major forex (93% payout) ----
+    "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDUSD_otc,USDCAD_otc,USDCHF_otc,NZDUSD_otc,"
+    # ---- Cross forex (93% payout) ----
+    "EURGBP_otc,EURJPY_otc,GBPJPY_otc,EURCHF_otc,AUDJPY_otc,CADJPY_otc,"
+    "CHFJPY_otc,GBPCHF_otc,GBPAUD_otc,GBPCAD_otc,EURNZD_otc,AUDCAD_otc,"
+    "AUDCHF_otc,AUDNZD_otc,NZDCAD_otc,NZDCHF_otc,NZDJPY_otc,EURAUD_otc,EURCAD_otc,"
+    # ---- High-payout exotics (65-94% payout) ----
+    "USDINR_otc,USDBDT_otc,USDTHB_otc,USDSGD_otc,USDZAR_otc,"
+    # ---- Crypto (75-92% payout) ----
+    "BTCUSD_otc,ETHUSD_otc,LTCUSD_otc,XRPUSD_otc,BCHUSD_otc,"
+    # ---- Commodities (70-85% payout) ----
+    "XAUUSD_otc,XAGUSD_otc,XTIUSD_otc,"
+    # ---- Indices (70-85% payout) ----
+    "US500_otc,US30_otc,USTECH100_otc,UK100_otc,GERMANY40_otc,JAPAN225_otc"
 )
 
 
@@ -58,7 +70,7 @@ class Settings:
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
     display_utc_offset_hours: int = 6
 
-    # ---- Assets (all supported) ----
+    # ---- Assets (all 65%+ payout) ----
     whitelist: Tuple[str, ...] = tuple(_list("ASSET_WHITELIST", DEFAULT_WHITELIST))
 
     # ---- Timeframes / expiry ----
@@ -83,7 +95,7 @@ class Settings:
     max_consec_losses: int = min(max(_i("MAX_CONSEC_LOSSES", 3), 1), 3)
     cooldown_minutes: int = max(_i("COOLDOWN_MINUTES", 30), 30)
     drawdown_guard_pct: float = min(max(_f("DRAWDOWN_GUARD_PCT", 15.0), 5.0), 15.0)
-    min_payout_pct: float = max(_f("MIN_PAYOUT_PCT", 80.0), 80.0)
+    min_payout_pct: float = max(_f("MIN_PAYOUT_PCT", 65.0), 65.0)
     max_concurrent_trades: int = 1
 
     max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 20)
@@ -191,7 +203,7 @@ def validate() -> List[str]:
         warnings.append("ASSET_WHITELIST empty -> bot will never trade.")
     if not settings.telegram_token or not settings.telegram_chat_id:
         warnings.append("Telegram token/chat id missing -> signals cannot be delivered.")
-    if settings.data_source not in ("yfinance", "csv", "synthetic"):
+    if settings.data_source not in ("biquote", "csv", "synthetic"):
         warnings.append(f"DATA_SOURCE='{settings.data_source}' not supported.")
     return warnings
 
