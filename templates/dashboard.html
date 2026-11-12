@@ -18,8 +18,7 @@
                     <div class="col-auto">Mode: <strong id="mode" class="text-light">—</strong></div>
                     <div class="col-auto">Account: <strong id="account" class="text-light">—</strong></div>
                     <div class="col-auto">MTG: <strong id="mtg" class="text-light">—</strong></div>
-                    <div class="col-auto">Strategy: <strong id="strat" class="text-light">—</strong></div>
-                    <div class="col-auto">TF: <strong id="tf" class="text-light">—</strong></div>
+                    <div class="col-auto">Assets: <strong id="asset-count" class="text-light">—</strong></div>
                 </div>
                 <div class="row mt-3 g-2 align-items-end">
                     <div class="col-auto">
@@ -32,12 +31,8 @@
                         </select>
                     </div>
                     <div class="col-auto">
-                        <label class="form-label small text-secondary mb-1">Strategy</label>
-                        <select id="sel-strategy" class="form-select form-select-sm">
-                            <option value="rulebook">Rulebook (SMC)</option>
-                            <option value="quick">Quick M1 (EMA+RSI+MACD+BB+Stoch)</option>
-                            <option value="news">News Breakout</option>
-                        </select>
+                        <label class="form-label small text-secondary mb-1">Strategy (auto)</label>
+                        <div id="lbl-strategy" class="form-control form-control-sm bg-dark text-info" style="min-width: 260px;">—</div>
                     </div>
                     <div class="col-auto">
                         <button id="btn-apply-settings" class="btn btn-primary btn-sm">Apply</button>
@@ -47,7 +42,7 @@
                     </div>
                 </div>
                 <div class="mt-2 small text-secondary">
-                    Assets: <span id="assets" class="text-light">—</span>
+                    Active assets: <span id="assets" class="text-light">—</span>
                 </div>
             </div>
         </div>
