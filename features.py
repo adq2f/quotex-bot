@@ -146,3 +146,15 @@ def pre_mtg_alert(bot, now: datetime) -> None:
         else:
             bot.tg.message(f"ℹ️ <b>{sig.asset}</b>: price is against the signal, but MTG1 will be "
                            f"<b>SKIPPED</b> ({why or 'risk limit'})")
+
+
+def attach_precheck(strategy) -> None:
+    """QuickStrategy has no mtg_precheck: re-run evaluate and require the same direction."""
+    if hasattr(strategy, "mtg_precheck"):
+        return
+
+    def pre(asset, direction, m5, h1, h4, now):
+        d = strategy.evaluate(asset, m5, h1, h4, now)
+        return d.decision == direction, (d.notes or d.gate or "signal no longer valid")
+
+    strategy.mtg_precheck = pre
