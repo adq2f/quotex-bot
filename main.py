@@ -114,8 +114,7 @@ class Bot:
 
     def _viz(self, d, m5):
         s = getattr(d, "setup", None)
-        if s is None:
-            return {}
+        if s is None: return {}
         t = lambda i: m5.index[i].isoformat() if i is not None and 0 <= i < len(m5) else None
         return {"zone": list(s.zone), "ob": list(s.ob), "ob_time": t(s.ob_idx),
                 "fvg": list(s.fvg) if s.fvg else None, "fvg_time": t(s.fvg_idx),
@@ -186,62 +185,58 @@ class Bot:
         if self.tracker.pending:
             return
         peek = getattr(self.source, "get_candles_peek", None)
-        if peek is None:
-            return
+        if peek is None: return
         bad = fx.bad_assets(self)
         candidates = []
         for asset in cfg.whitelist:
-            if asset in bad:
-                continue
+            if asset in bad: continue
             try:
                 m5 = peek(asset, cfg.entry_tf_seconds, 300, now)
-                if len(m5) < cfg.min_entry_candles:
-                    continue
+                if len(m5) < cfg.min_entry_candles: continue
                 h1 = self.source.get_candles(asset, 3600, 300, now)
                 h4 = self.source.get_candles(asset, 14400, 300, now)
-                if len(h1) < 50 or len(h4) < 50:
-                    continue
+                if len(h1) < 50 or len(h4) < 50: continue
                 d = self.strategy.evaluate(asset, m5, h1, h4, now)
-                if d.decision == "HOLD" or d.score < cfg.prepare_min_score:
-                    continue
+                if d.decision == "HOLD" or d.score < cfg.prepare_min_score: continue
                 entry_time = d.candle_close or now
-                if entry_time <= now:
-                    continue
+                if entry_time <= now: continue
                 candidates.append((d, entry_time))
             except Exception as e:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         
-        if not candidates:
-            return
+        if not candidates: return
         top = candidates[0]
         d, entry_time = top
         self._pre_scan_candidate = (d.asset, d.decision)
         
-        # মেসেজ ১: ১৫ সেকেন্ড আগে শুধু মার্কেটের নাম
-        self.tg.message(f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>")
+        # মেসেজ ১: ১৫ সেকেন্ড আগে Watch Market
+        self.tg.message(f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 8s direction.</i>")
         log("prepare_watch_sent", asset=d.asset, direction=d.decision)
 
     def resolve_due(self, now):
         cfg = self.cfg
-        if self.source is None:
-            return
+        if self.source is None: return
         for sig in self.tracker.due(now):
             try:
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 120, now)
             except Exception as e:
                 log("resolve_fetch_failed", id=sig.id, error=str(e)[:200])
                 continue
+                
             exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)
-            if exp not in m5.index:
+            
+            # --- FIX: ক্যান্ডেল ম্যাচ না করলেও রেজাল্ট বের করা ---
+            valid_candles = m5[m5.index <= exp]
+            if len(valid_candles) == 0:
                 sig.tries += 1
                 if sig.tries >= 3:
                     self.tracker.close(sig, "VOID")
-                    log("void_signal", asset=sig.asset, id=sig.id)
                 else:
                     self.tracker.update(sig)
                 continue
-            m5 = m5.loc[:exp]
+                
+            m5 = valid_candles
             exit_price = float(m5["close"].iloc[-1])
             outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
             pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
@@ -256,35 +251,27 @@ class Bot:
                 self._try_mtg(sig, now)
                 created = len(self.tracker.pending) > before
                 if not created and cfg.mtg_enabled and sig.step < cfg.mtg_max_steps:
-                    self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset} (conditions not valid)")
+                    self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset}")
             if not created:
                 fx.maybe_history_report(self)
                 
             if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
                 if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
-                    self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow (00:00 UTC).")
+                    self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
                     self.send_daily_summary(now)
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
-        if self.source is None or not cfg.mtg_enabled or sig.step >= cfg.mtg_max_steps:
-            return
+        if self.source is None or not cfg.mtg_enabled or sig.step >= cfg.mtg_max_steps: return
         m5, h1, h4 = self._frames(sig.asset, now)
         ok, why = self.strategy.mtg_precheck(sig.asset, sig.direction, m5, h1, h4, now)
-        if not ok:
-            log("mtg_skipped", asset=sig.asset, reason=why)
-            return
+        if not ok: return
         payout = self._payout(sig.asset)
-        ok, status = self.risk.can_open(sig.asset, sig.direction, now, payout,
-                                        pending=len(self.tracker.pending), is_mtg=True)
-        if not ok:
-            log("mtg_skipped", asset=sig.asset, reason=status)
-            return
+        ok, status = self.risk.can_open(sig.asset, sig.direction, now, payout, pending=len(self.tracker.pending), is_mtg=True)
+        if not ok: return
         base = sig.base_stake or sig.stake
         stake = self.risk.mtg_stake(base, payout)
-        if stake is None:
-            log("mtg_skipped", asset=sig.asset, reason="seq_risk")
-            return
+        if stake is None: return
         entry_time = m5.index[-1] + pd.Timedelta(seconds=cfg.entry_tf_seconds)
         expiry = entry_time + pd.Timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
         ms = Signal(asset=sig.asset, direction=sig.direction, entry_time=entry_time.isoformat(),
@@ -295,14 +282,11 @@ class Bot:
         self.risk.register_signal(sig.asset, sig.direction, now, is_mtg=True)
         self.executor.execute(ms)
         self._send_signal(ms, m5)
-        log("mtg_signal", id=ms.id, parent=sig.id, stake=stake)
 
     def reconnect_source(self):
         try:
-            if self.source is not None:
-                self.source.close()
-        except Exception:
-            pass
+            if self.source is not None: self.source.close()
+        except: pass
         self.source = make_source(self.cfg, self.store)
         self.executor.source = self.source
         self._htf = {}
@@ -310,71 +294,33 @@ class Bot:
 
     def scan(self, now):
         cfg = self.cfg
-        if self.source is None:
-            self.diag["no_source"] += 1
-            return
-            
+        if self.source is None: return
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
                 if now > exp + pd.Timedelta(minutes=5):
                     self.tracker.close(sig, "VOID")
-                    log("void_stuck_signal", id=sig.id)
-            
-            if self.tracker.pending:
-                self.diag["pending_trade"] += 1
-                return
+            if self.tracker.pending: return
                 
-        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
-            self.diag["daily_limit_reached"] += 1
-            return
+        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day: return
             
-        started, tried, empty, errors, cands = time.time(), 0, 0, 0, []
+        cands = []
         bad = fx.bad_assets(self)
         for asset in cfg.whitelist:
-            tried += 1
-            if asset in bad:
-                self.diag["asset_filtered"] += 1
-                continue
+            if asset in bad: continue
             try:
                 m5, h1, h4 = self._frames(asset, now)
-            except Exception as e:
-                errors += 1
-                self.diag["frames_exception"] += 1
-                continue
-            if m5 is None or len(m5) == 0:
-                empty += 1
-                continue
-            if len(h1) < 50 or len(h4) < 50:
-                self.diag["short_htf"] += 1
-                continue
-            try:
+                if len(m5) == 0 or len(h1) < 50 or len(h4) < 50: continue
                 d = self.strategy.evaluate(asset, m5, h1, h4, now)
-            except Exception as e:
-                errors += 1
-                continue
-            gate = getattr(d, "gate", "") or ""
-            self.diag[gate or d.decision] += 1
-            payload = d.to_dict() if hasattr(d, "to_dict") else {
-                "asset": getattr(d, "asset", asset), "decision": d.decision, "score": d.score,
-                "notes": getattr(d, "notes", "")}
-            self.store.log_decision(asset, d.decision, d.score, gate, payload)
-            if d.decision != "HOLD":
-                cands.append((d, m5))
+                if d.decision != "HOLD":
+                    cands.append((d, m5))
+            except: continue
                 
-        if not cands:
-            return
+        if not cands: return
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
-        
-        age = (utcnow() - d.candle_close).total_seconds()
-        if age > cfg.signal_max_age_seconds:
-            log("stale_signal_warning", asset=d.asset, age=round(age, 1))
-            
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
-        if not ok:
-            self.diag["risk_block"] += 1
-            return
+        if not ok: return
         stake = self.risk.base_stake(d.asset, payout)
         entry_time = d.candle_close
         expiry = entry_time + timedelta(seconds=cfg.entry_tf_seconds * cfg.expiry_candles)
@@ -390,7 +336,6 @@ class Bot:
 
     def summary_numbers(self, since_iso=None):
         rows = self.store.signal_rows(since_iso)
-
         def agg(rs):
             w = sum(r["status"] == "WIN" for r in rs)
             l = sum(r["status"] == "LOSS" for r in rs)
@@ -405,13 +350,9 @@ class Bot:
 
     def send_daily_summary(self, now):
         today = now.strftime("%Y-%m-%d")
-        if self.store.kv_get("last_daily_summary") == today:
-            return 
-            
+        if self.store.kv_get("last_daily_summary") == today: return 
         rows = self.store.signal_rows(today)
-        if not rows:
-            return
-
+        if not rows: return
         self.store.kv_set("last_daily_summary", today)
         
         total = len(rows)
@@ -424,45 +365,32 @@ class Bot:
         assets = {}
         for r in rows:
             a = r["asset"]
-            if a not in assets:
-                assets[a] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if a not in assets: assets[a] = {"wins": 0, "losses": 0, "pnl": 0.0}
             if r["status"] == "WIN": assets[a]["wins"] += 1
             elif r["status"] == "LOSS": assets[a]["losses"] += 1
             assets[a]["pnl"] += r["pnl"]
 
-        msg = f"📊 <b>DAILY SIGNAL REPORT - {today}</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg = f"📊 <b>DAILY SIGNAL REPORT - {today}</b>\n━━━━━━━━━━━━━━━━━━\n"
         msg += f"Total Signals: <b>{total}</b> (Max: {self.cfg.max_signals_per_day})\n"
         msg += f"✅ Wins: <b>{wins}</b> | ❌ Losses: <b>{losses}</b> | ➖ Draws: <b>{draws}</b>\n"
-        msg += f"🎯 Win Rate: <b>{win_rate}%</b>\n"
-        msg += f"💰 Net P/L: <b>{pnl:+.2f}$</b>\n"
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"<b>Market Breakdown:</b>\n"
-
+        msg += f"🎯 Win Rate: <b>{win_rate}%</b>\n💰 Net P/L: <b>{pnl:+.2f}$</b>\n━━━━━━━━━━━━━━━━━━\n<b>Market Breakdown:</b>\n"
         for a, data in assets.items():
             msg += f"🔹 <b>{a}</b>: {data['wins']}W - {data['losses']}L | {data['pnl']:+.2f}$\n"
-
         self.tg.message(msg)
 
     def daily_report(self, now):
         cfg = self.cfg
         today = now.strftime("%Y-%m-%d")
-        if now.hour < cfg.daily_report_hour_utc or self.store.kv_get("last_report") == today:
-            return
+        if now.hour < cfg.daily_report_hour_utc or self.store.kv_get("last_report") == today: return
         self.store.kv_set("last_report", today)
         self.send_daily_summary(now)
 
     def cycle(self, now=None):
         now = now or utcnow()
         if self.source is None:
-            self.diag["no_source"] += 1
             self.daily_report(now)
             cleanup_old(self.cfg.charts_dir)
             return
-        if self.cfg.execution_mode == "execute":
-            b = self.source.get_balance()
-            if b:
-                self.risk.set_balance(b)
         self.resolve_due(now)
         if not self.pause_event.is_set():
             self.scan(now)
@@ -470,10 +398,8 @@ class Bot:
         cleanup_old(self.cfg.charts_dir)
 
     def run_forever(self):
-        for w in validate():
-            log("config_warning", msg=w)
-        log("bot_loop_started", mode=self.cfg.strategy_mode, tf=self.cfg.entry_tf_seconds,
-            assets=len(self.cfg.whitelist), feed=self.feed_label())
+        for w in validate(): log("config_warning", msg=w)
+        log("bot_loop_started", mode=self.cfg.strategy_mode, tf=self.cfg.entry_tf_seconds, assets=len(self.cfg.whitelist), feed=self.feed_label())
         while not self.stop_event.is_set():
             tf = self.cfg.entry_tf_seconds
             next_boundary = (int(time.time() // tf) + 1) * tf
@@ -482,22 +408,18 @@ class Bot:
             if prepare_sec > 0:
                 pre_at = next_boundary - prepare_sec
                 while time.time() < pre_at and not self.stop_event.is_set():
-                    if self.cfg.entry_tf_seconds != tf:
-                        break
+                    if self.cfg.entry_tf_seconds != tf: break
                     time.sleep(min(0.5, max(0.0, pre_at - time.time())))
                 
-                if self.stop_event.is_set():
-                    break
+                if self.stop_event.is_set(): break
                 
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
                         self._pre_scan(utcnow())
-                        
                         # মেসেজ ২: ৫ সেকেন্ড আগে দিক (UP/DOWN) জানানো
                         at_5s = next_boundary - 5
                         while time.time() < at_5s and not self.stop_event.is_set():
-                            if self.cfg.entry_tf_seconds != tf:
-                                break
+                            if self.cfg.entry_tf_seconds != tf: break
                             time.sleep(min(0.5, max(0.0, at_5s - time.time())))
                         
                         if not self.stop_event.is_set() and self.cfg.entry_tf_seconds == tf and time.time() >= at_5s:
@@ -505,7 +427,6 @@ class Bot:
                                 asset, direction = self._pre_scan_candidate
                                 line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
                                 self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
-                                log("prepare_5s_sent", asset=asset, direction=direction)
                                 self._pre_scan_candidate = None
                     except Exception as e:
                         log("pre_scan_cycle_error", error=str(e)[:300])
@@ -516,25 +437,18 @@ class Bot:
                 while time.time() < at and not self.stop_event.is_set():
                     time.sleep(min(0.5, max(0.0, at - time.time())))
                 if not self.stop_event.is_set():
-                    try:
-                        fx.pre_mtg_alert(self, utcnow())
-                    except Exception as e:
-                        log("mtg_alert_error", error=str(e)[:200])
+                    try: fx.pre_mtg_alert(self, utcnow())
+                    except: pass
                         
             while time.time() < next_boundary and not self.stop_event.is_set():
-                if self.cfg.entry_tf_seconds != tf:
-                    break
+                if self.cfg.entry_tf_seconds != tf: break
                 time.sleep(min(0.5, max(0.0, next_boundary - time.time())))
                 
-            if self.stop_event.is_set():
-                break
-            if self.cfg.entry_tf_seconds != tf:
-                continue
+            if self.stop_event.is_set(): break
+            if self.cfg.entry_tf_seconds != tf: continue
             time.sleep(max(0.0, self.cfg.scan_delay_seconds))
-            try:
-                self.cycle()
-            except Exception as e:
-                log("cycle_error", error=str(e)[:300])
+            try: self.cycle()
+            except Exception as e: log("cycle_error", error=str(e)[:300])
         log("bot_loop_exited")
 
 
