@@ -58,6 +58,10 @@ class Bot:
         self.pause_event.set()
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
+        
+        # নতুন: রেজাল্টের পর ৩ মিনিট গ্যাপ রাখার জন্য ভেরিয়েবল
+        self.last_result_time = None 
+        
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -200,7 +204,7 @@ class Bot:
                 if d.decision == "HOLD" or d.score < cfg.prepare_min_score: continue
                 entry_time = d.candle_close or now
                 if entry_time <= now: continue
-                candidates.append((d, entry_time, m5)) # m5 যুক্ত করা হলো ছবি আঁকার জন্য
+                candidates.append((d, entry_time, m5))
             except Exception as e:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
         candidates.sort(key=lambda x: x[0].score, reverse=True)
@@ -210,7 +214,7 @@ class Bot:
         d, entry_time, m5_peek = top
         self._pre_scan_candidate = (d.asset, d.decision)
         
-        # ---- Watch Market এর জন্য ছবি তৈরি ----
+        # Watch Market এর জন্য ছবি তৈরি
         path = os.path.join(self.cfg.charts_dir, f"watch_{d.asset}.png")
         info = {"asset": d.asset, "direction": d.decision, "score": d.score, "step": 0,
                 "tf_seconds": cfg.entry_tf_seconds, "entry_price": d.entry_price,
@@ -223,7 +227,6 @@ class Bot:
             
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
         
-        # ছবি সহ মেসেজ পাঠানো
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
@@ -260,6 +263,9 @@ class Bot:
             self.tracker.close(sig, outcome, exit_price, pnl)
             log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
             self._send_result(sig, m5, outcome, pnl)
+            
+            # নতুন: রেজাল্ট আসার সময় সেভ করে রাখা (গ্যাপ দেওয়ার জন্য)
+            self.last_result_time = now
             
             created = False
             if outcome == "LOSS":
@@ -311,6 +317,12 @@ class Bot:
     def scan(self, now):
         cfg = self.cfg
         if self.source is None: return
+        
+        # নতুন: শেষ রেজাল্ট আসার ৩ মিনিট (১৮০ সেকেন্ড) পর্যন্ত নতুন সিগন্যাল খুঁজবে না
+        if self.last_result_time and (now - self.last_result_time).total_seconds() < 180:
+            self.diag["waiting_gap"] += 1
+            return
+            
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
@@ -442,7 +454,6 @@ class Bot:
                             if getattr(self, "_pre_scan_candidate", None):
                                 asset, direction = self._pre_scan_candidate
                                 line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
-                                # ৫ সেকেন্ডের মেসেজে শুধু টেক্সট যাবে, ছবি যাবে না
                                 self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
                                 self._pre_scan_candidate = None
                     except Exception as e:
