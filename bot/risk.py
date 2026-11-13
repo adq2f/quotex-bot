@@ -1,12 +1,5 @@
 """
 risk.py  --  Rulebook Section 6 + Section 16 (stateful risk manager; cannot be overridden by strategy).
-Persists to Store (if given) so cooldown / read-only guard survive restarts (needs a persistent disk on Render).
-
-FIX LOG v2.2:
-  - base_stake() no longer divides by payout. Section 6.1 requires risk = EXACTLY 1% of balance;
-    in binary options the loss on a trade is the full stake, so risk == stake. Section 6.6's formula
-    (balance*0.01/payout) targets 1% PROFIT but produces 1.176% RISK at 85% payout, violating 6.1's
-    "hard cap 2%". Capital preservation (6.1) wins.
 """
 import re
 from datetime import datetime, timedelta, timezone
@@ -34,7 +27,6 @@ class RiskManager:
                       "recent": []}
         self._save()
 
-    # ---------------------------------------------------------------- helpers
     def _save(self):
         if self.store:
             self.store.kv_set("risk_state", self.s)
@@ -62,10 +54,8 @@ class RiskManager:
                 return cu
         return None
 
-    # ---------------------------------------------------------------- gate
     def can_open(self, asset: str, direction: str, now: datetime, payout_pct: float,
                  pending: int = 0, is_mtg: bool = False) -> Tuple[bool, str]:
-        """Returns (ok, status_text). status_text is the 'RISK STATUS' line of Section 9."""
         c = self.cfg
         self._roll_day(now)
         if self.s["read_only"]:
@@ -81,50 +71,44 @@ class RiskManager:
             return False, "Trade already open [6.7]"
         if payout_pct < c.min_payout_pct:
             return False, f"Payout {payout_pct:.0f}% < {c.min_payout_pct:.0f}% [6.10]"
+        
         if not is_mtg:
             if self.s["signals_today"] >= c.max_signals_per_day:
                 return False, "Max signals/day reached"
             if self.s["asset_losses"].get(asset, 0) >= c.asset_loss_lock:
                 return False, f"{asset} locked today ({c.asset_loss_lock} losses)"
+            
             sym = base_symbol(asset)
             for ts, a2, d2 in self.s["recent"]:
                 t = datetime.fromisoformat(ts)
-                if (now - t) <= timedelta(minutes=5) and d2 == direction and a2 != sym:
+                # ১৫ মিনিটের কুলডাউন
+                if (now - t) <= timedelta(minutes=15) and d2 == direction and a2 != sym:
                     for grp in CORRELATED:
                         if sym in grp and a2 in grp:
-                            return False, "Correlated pair signalled <5 min ago [6.8]"
+                            return False, "Correlated pair signalled <15 min ago [6.8]"
         return True, "Normal"
 
-    # ---------------------------------------------------------------- sizing
     def base_stake(self, asset: str, payout_pct: float) -> float:
-        """Section 6.1: per-trade risk = EXACTLY 1% of balance (hard cap 2%).
-        In binary options the loss on a trade is the full stake, so risk == stake.
-        We do NOT divide by payout here: doing so targets 1% PROFIT but produces >1% RISK,
-        which violates 6.1's hard cap. payout_pct is kept in the signature for compatibility
-        and future logging, not used for sizing.
-        """
         c = self.cfg
         risk = c.mtg_base_risk_pct if c.mtg_enabled else c.max_risk_pct
-        stake = self.balance * risk / 100.0                                     # 6.1 (exactly risk%)
+        stake = self.balance * risk / 100.0
         if is_otc(asset):
-            stake *= c.otc_size_multiplier                                      # 5.2
-        stake = min(stake, self.balance * 0.02)                                 # 6.1 hard cap 2%
+            stake *= c.otc_size_multiplier
+        stake = min(stake, self.balance * 0.02)
         return round(max(stake, c.stake_min), 2)
 
     def mtg_stake(self, base_stake: float, payout_pct: float) -> Optional[float]:
-        """16.2: recover loss + original profit target. Returns None if sequence risk would exceed 2% of balance."""
         p = payout_pct / 100.0
         m = round(base_stake * (1 + p) / p, 2)
         if base_stake + m > self.balance * 0.02 + 1e-9:
             return None
         return m
 
-    # ---------------------------------------------------------------- events
     def register_signal(self, asset: str, direction: str, now: datetime, is_mtg: bool = False):
         self._roll_day(now)
         if not is_mtg:
             self.s["signals_today"] += 1
-        rec = [r for r in self.s["recent"] if (now - datetime.fromisoformat(r[0])) <= timedelta(minutes=10)]
+        rec = [r for r in self.s["recent"] if (now - datetime.fromisoformat(r[0])) <= timedelta(minutes=15)]
         rec.append([now.isoformat(), base_symbol(asset), direction])
         self.s["recent"] = rec
         self._save()
@@ -149,7 +133,6 @@ class RiskManager:
         self._save()
 
     def reset_read_only(self):
-        """Manual reset only (6.9). Re-bases the peak so the guard does not instantly re-trigger."""
         self.s["read_only"] = False
         self.s["peak"] = self.s["balance"]
         self._save()
