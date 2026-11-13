@@ -1,13 +1,12 @@
 """
-strategy_quick.py  --  1-min scalping with H4-dominant HTF bias. (FIXED & STRICTER)
+strategy_quick.py  --  Multi-Strategy Engine with Market Context Analysis.
+Determines if market is Strong Up, Normal Up, Stable, Normal Down, or Strong Down.
 """
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-
 import pandas as pd
 import numpy as np
-
 
 @dataclass
 class QuickDecision:
@@ -18,35 +17,16 @@ class QuickDecision:
     candle_close: Optional[datetime] = None
     notes: str = ""
     gate: str = ""
-
+    market_context: str = ""
+    strategy_used: str = ""
 
 class QuickStrategy:
-    MIN_CONFLUENCE = 3       
-    RSI_BUY = 30.0           
-    RSI_SELL = 70.0          
-    BB_PROXIMITY = 0.10
-    STOCH_LOW = 25.0
-    STOCH_HIGH = 75.0
-
-    ADX_MIN = 25.0           
-    ATR_MIN_RATIO = 0.65
-    ATR_MAX_RATIO = 2.5
-
-    REQUIRE_HTF_BIAS = True
-    REQUIRE_M5_ALIGNMENT = True
-    USE_SESSION_FILTER = True
-    ALLOWED_SESSIONS_UTC = [(6, 22)]
-
-    REQUIRE_MOMENTUM = True
-    REQUIRE_DI_AGREE = True
-
     def __init__(self, cfg, news=None):
         self.cfg = cfg
         self.news = news
 
-    def _ema(self, s, n):
-        return s.ewm(span=n, adjust=False).mean()
-
+    def _ema(self, s, n): return s.ewm(span=n, adjust=False).mean()
+    
     def _rsi(self, s, n=14):
         d = s.diff()
         up = d.clip(lower=0.0).ewm(alpha=1/n, adjust=False, min_periods=n).mean()
@@ -63,159 +43,115 @@ class QuickStrategy:
         mid = s.rolling(n).mean()
         sd = s.rolling(n).std(ddof=0)
         return mid + k * sd, mid, mid - k * sd
+        
+    def _atr(self, df, n=14):
+        tr = pd.concat([df["high"] - df["low"], (df["high"] - df["close"].shift()).abs(), (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
+        return tr.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
 
-    def _stoch(self, df, n=14):
-        lo = df["low"].rolling(n).min()
-        hi = df["high"].rolling(n).max()
-        k = 100 * (df["close"] - lo) / (hi - lo).replace(0, np.nan)
-        d = k.rolling(3).mean()
-        return k, d
-
-    def _adx(self, df, n=14):
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        up = high.diff()
-        dn = -low.diff()
-        plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
-        minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1/n, adjust=False, min_periods=n).mean() / atr.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.ewm(alpha=1/n, adjust=False, min_periods=n).mean() / atr.replace(0, np.nan))
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        adx = dx.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
-        return adx, plus_di, minus_di, atr
-
-    def _session_ok(self, now):
-        if not self.USE_SESSION_FILTER:
-            return True
-        h = now.hour
-        for start, end in self.ALLOWED_SESSIONS_UTC:
-            if start <= h < end:
-                return True
-        return False
-
-    def _htf_bias(self, h1, h4):
-        if len(h4) < 60:
-            return "UNKNOWN"
-        h4_e20 = float(self._ema(h4["close"], 20).iloc[-1])
-        h4_e50 = float(self._ema(h4["close"], 50).iloc[-1])
-        h4_p = float(h4["close"].iloc[-1])
-        h4_bull = h4_p > h4_e20 > h4_e50
-        h4_bear = h4_p < h4_e20 < h4_e50
-        if not (h4_bull or h4_bear):
-            return "NEUTRAL"
-        h1_bull = False
-        h1_bear = False
-        if len(h1) >= 60:
-            h1_e20 = float(self._ema(h1["close"], 20).iloc[-1])
-            h1_e50 = float(self._ema(h1["close"], 50).iloc[-1])
-            h1_p = float(h1["close"].iloc[-1])
-            h1_bull = h1_p > h1_e20 > h1_e50
-            h1_bear = h1_p < h1_e20 < h1_e50
-        if h4_bull and not h1_bear:
-            return "BULLISH"
-        if h4_bear and not h1_bull:
-            return "BEARISH"
-        return "NEUTRAL"
+    def _get_market_context(self, df, ema20, ema50, ema200, adx):
+        c = df["close"].iloc[-1]
+        e20, e50, e200 = ema20.iloc[-1], ema50.iloc[-1], ema200.iloc[-1]
+        adx_val = adx.iloc[-1]
+        
+        dist = abs(c - e20) / e20
+        
+        if adx_val < 20:
+            return "STABLE"
+        if c > e20 > e50 > e200:
+            return "STRONG_UP" if dist > 0.0005 else "NORMAL_UP"
+        if c < e20 < e50 < e200:
+            return "STRONG_DOWN" if dist > 0.0005 else "NORMAL_DOWN"
+        if c > e20 > e50:
+            return "NORMAL_UP"
+        if c < e20 < e50:
+            return "NORMAL_DOWN"
+        return "STABLE"
 
     def evaluate(self, asset, m5, h1, h4, now):
         d = QuickDecision(asset=asset)
-        if len(m5) < 60:
+        if len(m5) < 100: 
             d.gate = "warmup"
-            d.notes = "not enough candles"
             return d
 
         tf = self.cfg.entry_tf_seconds
         d.candle_close = (m5.index[-1] + pd.Timedelta(seconds=tf)).to_pydatetime()
         d.entry_price = float(m5["close"].iloc[-1])
 
-        if not self._session_ok(now):
-            d.gate = "session"
-            return d
-
         close = m5["close"]
-        ema5 = self._ema(close, 5)
-        ema10 = self._ema(close, 10)
         ema20 = self._ema(close, 20)
         ema50 = self._ema(close, 50)
+        ema200 = self._ema(close, 200)
         rsi = self._rsi(close, 14)
         _, _, hist = self._macd(close)
         bb_up, bb_mid, bb_lo = self._bb(close, 20, 2.0)
-        stoch_k, stoch_d = self._stoch(m5, 14)
-        adx_s, plus_di, minus_di, atr_s = self._adx(m5, 14)
+        
+        # ADX
+        high, low = m5["high"], m5["low"]
+        up, dn = high.diff(), -low.diff()
+        plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=m5.index)
+        minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=m5.index)
+        atr = self._atr(m5, 14)
+        plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr.replace(0, np.nan))
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        adx = dx.ewm(alpha=1/14, adjust=False).mean()
 
         i = len(close) - 1
         c = float(close.iloc[i])
-        e5, e10, e20, e50 = (float(ema5.iloc[i]), float(ema10.iloc[i]), float(ema20.iloc[i]), float(ema50.iloc[i]))
         r = float(rsi.iloc[i])
         mh = float(hist.iloc[i])
         bu, bl = float(bb_up.iloc[i]), float(bb_lo.iloc[i])
-        sk, sd = float(stoch_k.iloc[i]), float(stoch_d.iloc[i])
-        adx_val = float(adx_s.iloc[i])
-        pdi = float(plus_di.iloc[i])
-        mdi = float(minus_di.iloc[i])
+        adx_val = float(adx.iloc[i])
+        pdi, mdi = float(plus_di.iloc[i]), float(minus_di.iloc[i])
 
-        if np.isnan(adx_val) or adx_val < self.ADX_MIN:
-            d.gate = "low_adx"
-            return d
+        # মার্কেট অ্যানালাইসিস
+        context = self._get_market_context(m5, ema20, ema50, ema200, adx)
+        d.market_context = context
 
-        atr_vals = atr_s.dropna()
-        if len(atr_vals) >= 20:
-            cur_atr = float(atr_vals.iloc[-1])
-            avg_atr = float(atr_vals.iloc[-21:-1].mean())
-            if avg_atr > 0:
-                ratio = cur_atr / avg_atr
-                if ratio < self.ATR_MIN_RATIO or ratio > self.ATR_MAX_RATIO:
-                    d.gate = "atr_filter"
-                    return d
+        # --- স্ট্র্যাটেজি ১: Bollinger Band Bounce (Stable Market) ---
+        if context == "STABLE":
+            d.strategy_used = "Bollinger Bounce"
+            if c <= bl and r < 30 and c > float(m5["open"].iloc[i]):
+                d.decision = "BUY"
+                d.score = 75 + (30 - r)
+                d.notes = f"Stable Market BB Bounce (RSI {r:.0f})"
+                return d
+            if c >= bu and r > 70 and c < float(m5["open"].iloc[i]):
+                d.decision = "SELL"
+                d.score = 75 + (r - 70)
+                d.notes = f"Stable Market BB Bounce (RSI {r:.0f})"
+                return d
 
-        bias = self._htf_bias(h1, h4) if self.REQUIRE_HTF_BIAS else "UNKNOWN"
-        if bias == "UNKNOWN" or (self.REQUIRE_HTF_BIAS and bias == "NEUTRAL"):
-            d.gate = "htf_neutral"
-            return d
+        # --- স্ট্র্যাটেজি ২: Trend Pullback (Normal Trend) ---
+        elif context in ["NORMAL_UP", "STRONG_UP"]:
+            d.strategy_used = "Trend Pullback"
+            if c > ema50.iloc[i] and c <= ema20.iloc[i] * 1.002 and r < 45 and mh > float(hist.iloc[i-1]):
+                d.decision = "BUY"
+                d.score = 80
+                d.notes = f"{context} Pullback to EMA20 (RSI {r:.0f})"
+                return d
+                
+        elif context in ["NORMAL_DOWN", "STRONG_DOWN"]:
+            d.strategy_used = "Trend Pullback"
+            if c < ema50.iloc[i] and c >= ema20.iloc[i] * 0.998 and r > 55 and mh < float(hist.iloc[i-1]):
+                d.decision = "SELL"
+                d.score = 80
+                d.notes = f"{context} Pullback to EMA20 (RSI {r:.0f})"
+                return d
 
-        band_width = bu - bl
-        near_upper = (bu - c) <= band_width * self.BB_PROXIMITY
-        near_lower = (c - bl) <= band_width * self.BB_PROXIMITY
-
-        buy, sell = 0, 0
-        if e5 > e10 > e50 and c > e5: buy += 1
-        elif e5 < e10 < e50 and c < e5: sell += 1
-        if r < self.RSI_BUY: buy += 1
-        elif r > self.RSI_SELL: sell += 1
-        if mh > 0: buy += 1
-        else: sell += 1
-        if near_lower: buy += 1
-        elif near_upper: sell += 1
-        if sk < self.STOCH_LOW and sk > sd: buy += 1
-        elif sk > self.STOCH_HIGH and sk < sd: sell += 1
-
-        m5_ok_buy = (c > e20) and (e5 > e20) if self.REQUIRE_M5_ALIGNMENT else True
-        m5_ok_sell = (c < e20) and (e5 < e20) if self.REQUIRE_M5_ALIGNMENT else True
-        mom_ok_buy = (e5 > e10) or (mh > 0) if self.REQUIRE_MOMENTUM else True
-        mom_ok_sell = (e5 < e10) or (mh < 0) if self.REQUIRE_MOMENTUM else True
-        di_buy_ok = (pdi > mdi) if self.REQUIRE_DI_AGREE else True
-        di_sell_ok = (mdi > pdi) if self.REQUIRE_DI_AGREE else True
-        bias_ok_buy = (bias == "BULLISH") if self.REQUIRE_HTF_BIAS else True
-        bias_ok_sell = (bias == "BEARISH") if self.REQUIRE_HTF_BIAS else True
-
-        if (buy >= self.MIN_CONFLUENCE and bias_ok_buy and m5_ok_buy and mom_ok_buy and di_buy_ok):
-            d.decision = "BUY"
-            d.score = 50 + buy * 10
-            d.notes = f"BUY {buy}/5 ADX={adx_val:.0f} bias={bias} RSI={r:.0f}"
-            return d
-
-        if (sell >= self.MIN_CONFLUENCE and bias_ok_sell and m5_ok_sell and mom_ok_sell and di_sell_ok):
-            d.decision = "SELL"
-            d.score = 50 + sell * 10
-            d.notes = f"SELL {sell}/5 ADX={adx_val:.0f} bias={bias} RSI={r:.0f}"
-            return d
+        # --- স্ট্র্যাটেজি ৩: Momentum Breakout (Strong Trend) ---
+        if context in ["STRONG_UP", "STRONG_DOWN"] and adx_val > 30:
+            d.strategy_used = "Momentum Breakout"
+            if context == "STRONG_UP" and c > m5["high"].iloc[i-3:i].max() and pdi > mdi:
+                d.decision = "BUY"
+                d.score = 85
+                d.notes = f"STRONG_UP Breakout (ADX {adx_val:.0f})"
+                return d
+            if context == "STRONG_DOWN" and c < m5["low"].iloc[i-3:i].min() and mdi > pdi:
+                d.decision = "SELL"
+                d.score = 85
+                d.notes = f"STRONG_DOWN Breakout (ADX {adx_val:.0f})"
+                return d
 
         d.gate = "filtered"
         return d
