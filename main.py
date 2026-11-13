@@ -39,7 +39,6 @@ class Bot:
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
-        log("BOT_STARTUP", VERSION="V7-STRICT-LIMIT")
         
         if self.source is None:
             try:
@@ -60,6 +59,12 @@ class Bot:
         self.pause_event.set()
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
+        
+        # --- হার্ড মেমরি লিমিট এবং গ্যাপ ---
+        self.signals_sent_today = 0
+        self.last_signal_time = 0
+        self.last_result_time = 0
+        self.last_reset_day = utcnow().strftime("%Y-%m-%d")
         
         # আটকে থাকা সিগন্যাল ক্লিয়ার
         if self.tracker.pending:
@@ -147,7 +152,7 @@ class Bot:
             
         feed = self.feed_label()
         
-        # এক মেসেজে ছবি এবং টেক্সট (Caption)
+        # এক মেসেজে ছবি এবং টেক্সট
         cap = (f"📢 <b>SIGNAL</b>\n"
                f"{signal_type}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
@@ -196,17 +201,15 @@ class Bot:
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
             return
             
-        # --- কড়া লিমিট চেক ---
-        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+        # কড়া লিমিট চেক
+        if self.signals_sent_today >= self.cfg.max_signals_per_day:
             return
             
         if self.tracker.pending:
             return
         
-        # ৩ মিনিটের গ্যাপ চেক
-        last_sig = self.store.kv_get("last_signal_time", 0)
-        last_res = self.store.kv_get("last_result_time", 0)
-        if (time.time() - last_sig) < 180 or (time.time() - last_res) < 180:
+        # ৩ মিনিট গ্যাপ চেক
+        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             return
             
         peek = getattr(self.source, "get_candles_peek", None)
@@ -267,8 +270,8 @@ class Bot:
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 self.tracker.close(sig, outcome, exit_price, pnl)
                 
-                # ডাটাবেসে রেজাল্ট টাইম সেভ (৩ মিনিট গ্যাপের জন্য)
-                self.store.kv_set("last_result_time", time.time())
+                # রেজাল্ট টাইম সেভ (মেমরিতে)
+                self.last_result_time = time.time()
                 
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
                 self._send_result(sig, m5, outcome, pnl)
@@ -281,7 +284,7 @@ class Bot:
                 if not created:
                     fx.maybe_history_report(self)
                     
-                if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+                if self.signals_sent_today >= self.cfg.max_signals_per_day:
                     if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
                         self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow.")
                         self.send_daily_summary(now)
@@ -315,14 +318,12 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
-        # কড়া লিমিট চেক
-        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day: 
+        # কড়া মেমরি লিমিট চেক
+        if self.signals_sent_today >= self.cfg.max_signals_per_day: 
             return
             
-        # ডাটাবেস থেকে ৩ মিনিটের গ্যাপ চেক
-        last_sig = self.store.kv_get("last_signal_time", 0)
-        last_res = self.store.kv_get("last_result_time", 0)
-        if (time.time() - last_sig) < 180 or (time.time() - last_res) < 180:
+        # ৩ মিনিট গ্যাপ চেক (মেমরিতে)
+        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             self.diag["waiting_gap"] += 1
             return
             
@@ -361,8 +362,9 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
-        # ডাটাবেসে সিগন্যাল টাইম সেভ
-        self.store.kv_set("last_signal_time", time.time())
+        # মেমরিতে সিগন্যাল কাউন্ট এবং টাইম সেভ
+        self.signals_sent_today += 1
+        self.last_signal_time = time.time()
         
         log("SIGNAL_SENT", id=sig.id, asset=d.asset, direction=d.decision, score=d.score)
         self._send_signal(sig, m5)
@@ -424,6 +426,15 @@ class Bot:
             self.daily_report(now)
             cleanup_old(self.cfg.charts_dir)
             return
+            
+        # প্রতিদিন রিসেট লজিক
+        today = now.strftime("%Y-%m-%d")
+        if today != self.last_reset_day:
+            self.signals_sent_today = 0
+            self.last_reset_day = today
+            self.last_signal_time = 0
+            self.last_result_time = 0
+            
         self.resolve_due(now)
         if not self.pause_event.is_set():
             self.scan(now)
@@ -448,8 +459,8 @@ class Bot:
                 
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
-                        # লিমিট চেক (মেইন লুপে)
-                        if self.risk.s["signals_today"] < self.cfg.max_signals_per_day:
+                        # মেমরি লিমিট চেক
+                        if self.signals_sent_today < self.cfg.max_signals_per_day:
                             self._pre_scan(utcnow())
                             
                             at_5s = next_boundary - 5
