@@ -2,85 +2,65 @@
     const $ = (id) => document.getElementById(id);
     const fmtMoney = (v) => v == null ? '—' : (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const cls = (v) => v > 0 ? 'text-success' : v < 0 ? 'text-danger' : '';
+    const STRAT = {60: 'Quick M1 (EMA+RSI+MACD+BB+Stoch)'};
+    const label = (tf) => STRAT[tf] || 'Rulebook (SMC)';
 
-    const TF_TO_STRATEGY = {
-        "60":   "quick",
-        "300":  "rulebook",
-        "900":  "rulebook",
-        "3600": "rulebook",
-    };
-    const STRATEGY_LABEL = {
-        "quick":    "Quick M1 (EMA+RSI+MACD+BB+Stoch)",
-        "rulebook": "Rulebook (SMC)",
-    };
-
-    function statusPill(st) {
-        const pill = $('bot-status-pill');
-        if (!st.controller.started) { pill.className = 'badge bg-danger fs-6'; pill.textContent = '⛔ Thread dead'; return; }
-        if (st.controller.paused)   { pill.className = 'badge bg-warning text-dark fs-6'; pill.textContent = '⏸ Paused'; return; }
-        pill.className = 'badge bg-success fs-6'; pill.textContent = '🟢 Running';
-    }
-
-    function updateStrategyLabel(tf) {
-        const strat = TF_TO_STRATEGY[String(tf)] || "rulebook";
-        $('lbl-strategy').textContent = STRATEGY_LABEL[strat] || strat;
+    function pill(st) {
+        const p = $('bot-status-pill');
+        const [c, t] = !st.controller.started ? ['dead', 'Thread dead'] : st.controller.paused ? ['off', 'Paused'] : ['on', 'Running'];
+        p.className = 'pill ' + c; p.innerHTML = '<span class="dot"></span>' + t;
     }
 
     async function refresh() {
         try {
             const r = await fetch('/api/bot/status', { credentials: 'same-origin' });
             if (r.status === 401) { location.href = '/login'; return; }
-            if (!r.ok) throw new Error('status ' + r.status);
             const d = await r.json();
-            statusPill(d);
-            $('mode').textContent    = d.mode;
-            $('account').textContent = d.account;
-            $('mtg').textContent     = d.mtg_enabled ? 'ON' : 'OFF';
+            pill(d);
+            $('mode').textContent = d.mode; $('account').textContent = d.account; $('feed').textContent = d.feed || '—';
             $('asset-count').textContent = (d.whitelist || []).length;
-
-            const rk = d.risk || {};
+            $('assets').textContent = (d.whitelist || []).slice(0, 12).join(', ') + ((d.whitelist || []).length > 12 ? ' …' : '');
+            const rk = d.risk || {}, pnl = rk.day_pnl ?? 0;
             $('r-balance').textContent = '$' + (rk.balance ?? 0).toFixed(2);
-            const pnl = rk.day_pnl ?? 0;
-            $('r-day-pnl').textContent = fmtMoney(pnl);
-            $('r-day-pnl').className = 'h5 mb-0 ' + (pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : '');
+            $('r-day-pnl').textContent = fmtMoney(pnl); $('r-day-pnl').className = 'h5 mb-0 ' + cls(pnl);
             $('r-consec').textContent = rk.consec_losses ?? 0;
             $('r-cooldown').textContent = rk.cooldown_until ? rk.cooldown_until.slice(11, 16) + ' UTC' : '—';
             $('readonly-banner').classList.toggle('d-none', !rk.read_only);
-
-            const sum = d.summary || {};
             for (const k of ['all', 'base', 'mtg']) {
-                const a = sum[k] || {};
+                const a = (d.summary || {})[k] || {};
                 $('s-' + k + '-winrate').textContent = a.win_rate == null ? '—' : a.win_rate + '%';
-                $('s-' + k + '-pf').textContent = a.profit_factor == null ? '—' : a.profit_factor;
-                const cell = $('s-' + k + '-pnl');
-                cell.textContent = fmtMoney(a.pnl ?? 0);
-                cell.className = (a.pnl ?? 0) > 0 ? 'text-success' : (a.pnl ?? 0) < 0 ? 'text-danger' : '';
+                $('s-' + k + '-pf').textContent = a.profit_factor ?? '—';
+                const c = $('s-' + k + '-pnl'); c.textContent = fmtMoney(a.pnl ?? 0); c.className = cls(a.pnl ?? 0);
             }
-
-            const tbody = $('signals-body');
-            if (!d.recent || d.recent.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" class="text-center text-secondary">No signals yet</td></tr>';
-            } else {
-                tbody.innerHTML = d.recent.map(s => {
-                    const sideCls = s.direction === 'BUY' ? 'success' : 'danger';
-                    const stCls = ({WIN:'success',LOSS:'danger',DRAW:'secondary',PENDING:'info',VOID:'warning'})[s.status] || 'secondary';
-                    const pnlCls = (s.pnl ?? 0) > 0 ? 'text-success' : (s.pnl ?? 0) < 0 ? 'text-danger' : '';
-                    const step = s.step === 0 ? 'base' : 'MTG' + s.step;
-                    return `<tr>
-                        <td class="small">${esc((s.ts || '').replace('T',' ').slice(0,19))}</td>
-                        <td>${esc(s.asset)}</td>
-                        <td><span class="badge bg-${sideCls}">${esc(s.direction)}</span></td>
-                        <td><span class="badge bg-secondary">${esc(step)}</span></td>
-                        <td>${s.entry_price ?? '—'}</td>
-                        <td>${s.stake != null ? '$' + Number(s.stake).toFixed(2) : '—'}</td>
-                        <td>${s.payout_pct ?? '—'}</td>
-                        <td>${s.score ?? '—'}</td>
-                        <td><span class="badge bg-${stCls}">${esc(s.status)}</span></td>
-                        <td class="${pnlCls}">${fmtMoney(s.pnl ?? 0)}</td>
-                    </tr>`;
+            const tb = $('signals-body');
+            tb.innerHTML = !d.recent || !d.recent.length
+                ? '<tr><td colspan="10" class="text-center text-secondary">No signals yet</td></tr>'
+                : d.recent.map(s => {
+                    const sc = s.direction === 'BUY' ? 'success' : 'danger';
+                    const st = ({WIN:'success',LOSS:'danger',DRAW:'secondary',PENDING:'info',VOID:'warning'})[s.status] || 'secondary';
+                    return `<tr><td class="small">${esc((s.ts || '').replace('T',' ').slice(0,19))}</td><td>${esc(s.asset)}</td>
+                      <td><span class="badge bg-${sc}">${esc(s.direction)}</span></td>
+                      <td><span class="badge bg-secondary">${s.step === 0 ? 'base' : 'MTG' + s.step}</span></td>
+                      <td>${s.entry_price ?? '—'}</td><td>${s.stake != null ? '$' + Number(s.stake).toFixed(2) : '—'}</td>
+                      <td>${s.payout_pct ?? '—'}</td><td>${s.score ?? '—'}</td>
+                      <td><span class="badge bg-${st}">${esc(s.status)}</span></td>
+                      <td class="${cls(s.pnl ?? 0)}">${fmtMoney(s.pnl ?? 0)}</td></tr>`;
                 }).join('');
-            }
             $('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        } catch (e) { console.error(e); }
+    }
+
+    async function loadHistory() {
+        try {
+            const r = await fetch('/api/history', { credentials: 'same-origin' });
+            if (!r.ok) return;
+            const h = await r.json(), t = h.total || {};
+            $('h-total').textContent = t.count ? `Total ${t.count} signals · win rate ${t.win_rate ?? '—'}% · P/L ${fmtMoney(t.pnl)}` : 'No finished signals yet';
+            if (!h.blocks || !h.blocks.length) return;
+            $('history-body').innerHTML = h.blocks.map(b => `<tr><td>#${b.n}${b.complete ? '' : ' <span class="badge bg-secondary">open</span>'}</td>
+                <td>${b.count}</td><td>${b.wins}</td><td>${b.mtg_wins}</td><td>${b.losses}</td><td>${b.win_rate ?? '—'}%</td>
+                <td class="${cls(b.pnl)}">${fmtMoney(b.pnl)}</td></tr>`).join('');
         } catch (e) { console.error(e); }
     }
 
@@ -89,54 +69,30 @@
         if (r.status === 401) { location.href = '/login'; return; }
         await refresh();
     }
+    const save = (body) => fetch('/api/settings', { method: 'POST', credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
 
     document.addEventListener('DOMContentLoaded', () => {
-        $('btn-start').onclick   = () => post('/api/bot/start');
-        $('btn-stop').onclick    = () => post('/api/bot/stop');
-        $('btn-refresh').onclick = refresh;
-
-        $('sel-timeframe').addEventListener('change', () => {
-            updateStrategyLabel($('sel-timeframe').value);
-        });
-
-        fetch('/api/settings', { credentials: 'same-origin' })
-            .then(r => r.json())
-            .then(s => {
-                if (s.web_timeframe_seconds) {
-                    $('sel-timeframe').value = String(s.web_timeframe_seconds);
-                    updateStrategyLabel(s.web_timeframe_seconds);
-                }
-            })
-            .catch(() => {});
-
+        $('btn-start').onclick = () => post('/api/bot/start');
+        $('btn-stop').onclick = () => post('/api/bot/stop');
+        $('btn-refresh').onclick = () => { refresh(); loadHistory(); };
+        $('sel-timeframe').addEventListener('change', () => { $('lbl-strategy').textContent = label(+$('sel-timeframe').value); });
+        $('sw-mtg').addEventListener('change', async () => { await save({ mtg_enabled: $('sw-mtg').checked }); refresh(); });
+        fetch('/api/settings', { credentials: 'same-origin' }).then(r => r.json()).then(s => {
+            $('sw-mtg').checked = !!s.mtg_enabled;
+            if (s.web_timeframe_seconds) { $('sel-timeframe').value = String(s.web_timeframe_seconds); $('lbl-strategy').textContent = label(s.web_timeframe_seconds); }
+        }).catch(() => {});
         $('btn-apply-settings').onclick = async () => {
-            const body = { web_timeframe_seconds: parseInt($('sel-timeframe').value, 10) };
-            const el = $('settings-status');
-            el.textContent = 'Applying…'; el.className = 'small text-secondary';
+            const el = $('settings-status'); el.textContent = 'Applying…'; el.className = 'small text-secondary';
             try {
-                const r = await fetch('/api/settings', {
-                    method: 'POST', credentials: 'same-origin',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(body),
-                });
+                const r = await save({ web_timeframe_seconds: parseInt($('sel-timeframe').value, 10) });
                 const j = await r.json();
-                if (r.ok) {
-                    el.textContent = `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds / 60}min`;
-                    el.className = 'small text-success';
-                    updateStrategyLabel(j.applied.web_timeframe_seconds);
-                    setTimeout(() => { el.textContent = ''; }, 5000);
-                } else {
-                    el.textContent = j.error || 'Failed';
-                    el.className = 'small text-danger';
-                }
-            } catch (e) {
-                el.textContent = 'Network error';
-                el.className = 'small text-danger';
-            }
+                el.textContent = r.ok ? `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds / 60}min` : (j.error || 'Failed');
+                el.className = 'small ' + (r.ok ? 'text-success' : 'text-danger');
+            } catch (e) { el.textContent = 'Network error'; el.className = 'small text-danger'; }
             refresh();
         };
-
-        refresh();
-        setInterval(refresh, 5000);
+        refresh(); loadHistory();
+        setInterval(refresh, 5000); setInterval(loadHistory, 15000);
     });
 })();
