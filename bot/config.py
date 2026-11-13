@@ -26,6 +26,7 @@ def _list(name: str, default: str = "") -> List[str]:
     raw = os.getenv(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
 
+# OTC পেয়ার বাদ দেওয়া হয়েছে, শুধু রিয়েল মার্কেটের পেয়ার রাখা হয়েছে
 DEFAULT_WHITELIST = (
     "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,XAUUSD"
 )
@@ -47,12 +48,13 @@ class Settings:
     bias_tf_seconds: Tuple[int, int] = (14400, 3600)
     expiry_candles: int = min(max(_i("EXPIRY_CANDLES", 1), 1), 2)
     
+    # সিগন্যাল বাতিল (Stale) হওয়া বন্ধ করতে ১২০ সেকেন্ড করা হলো
     signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 120), 1), 300)
 
     strategy_mode: str = os.getenv("STRATEGY_MODE", "quick").lower()
     web_timeframe_seconds: int = _i("WEB_TIMEFRAME_SECONDS", 60)
 
-    # ১৫ সেকেন্ড আগে অ্যালার্ট দেওয়ার জন্য
+    # ১৫ সেকেন্ড আগে Watch Market অ্যালার্ট দেওয়ার জন্য
     prepare_alert_seconds: int = _i("PREPARE_ALERT_SECONDS", 15)
     prepare_min_score: int = _i("PREPARE_MIN_SCORE", 45)
     prepare_max_per_cycle: int = _i("PREPARE_MAX_PER_CYCLE", 1)
@@ -66,6 +68,7 @@ class Settings:
     min_payout_pct: float = max(_f("MIN_PAYOUT_PCT", 65.0), 65.0)
     max_concurrent_trades: int = 1
 
+    # ডিফল্ট ৫০টি সিগন্যাল, ওয়েবসাইট থেকে চেঞ্জ করা যাবে
     max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 50)
     asset_loss_lock: int = _i("ASSET_LOSS_LOCK", 3)
 
@@ -123,6 +126,7 @@ class Settings:
     impulse_body_mult: float = _f("IMPULSE_BODY_MULT", 1.2)
     three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)
     
+    # ১ মিনিটে দ্রুত ডাটা পেতে ২০ ক্যান্ডেল করা হলো
     min_entry_candles: int = 20
     min_bias_candles: int = 100
     stake_min: float = 1.0
@@ -159,6 +163,7 @@ def validate() -> List[str]:
     if settings.data_source not in ("biquote", "csv", "synthetic", "quotex"): warnings.append(f"DATA_SOURCE='{settings.data_source}' not supported.")
     return warnings
 
+# সব টাইমফ্রেমেই Universal Best Strategy (quick) চলবে
 TIMEFRAME_STRATEGY_MAP = {
     60:   "quick",
     300:  "quick",
