@@ -21,7 +21,7 @@ class RiskManager:
             b = balance if balance is not None else cfg.virtual_balance
             self.s = {"balance": b, "peak": b, "day": None, "day_start": b, "day_pnl": 0.0, "consec": 0,
                       "cooldown_until": None, "signals_today": 0, "asset_losses": {}, "read_only": False,
-                      "recent": []}
+                      "recent": [], "last_result_time": None}
         self._save()
 
     def _save(self):
@@ -66,13 +66,17 @@ class RiskManager:
         if not is_mtg:
             if self.s["signals_today"] >= c.max_signals_per_day: return False, "Max signals/day reached"
             
-            sym = base_symbol(asset)
-            # কুলডাউন: ১ মিনিটে ৩ মিনিট, ৫ মিনিটে ৫ মিনিট
-            cooldown_mins = 3 if c.entry_tf_seconds == 60 else 5
+            # গ্লোবাল ৩ মিনিট কুলডাউন (রেজাল্ট আসার পর ৩ মিনিট)
+            last_res = self.s.get("last_result_time")
+            if last_res:
+                t_res = datetime.fromisoformat(last_res)
+                if (now - t_res) <= timedelta(minutes=3):
+                    return False, "Global cooldown (3m after result)"
             
+            sym = base_symbol(asset)
             for ts, a2, d2 in self.s["recent"]:
                 t = datetime.fromisoformat(ts)
-                if (now - t) <= timedelta(minutes=cooldown_mins) and d2 == direction and a2 != sym:
+                if (now - t) <= timedelta(minutes=5) and d2 == direction and a2 != sym:
                     for grp in CORRELATED:
                         if sym in grp and a2 in grp:
                             return False, "Correlated pair signalled recently"
@@ -106,6 +110,9 @@ class RiskManager:
         self.s["balance"] += pnl
         self.s["day_pnl"] += pnl
         self.s["peak"] = max(self.s["peak"], self.s["balance"])
+        
+        # রেজাল্ট টাইম সেভ করা (গ্লোবাল কুলডাউনের জন্য)
+        self.s["last_result_time"] = now.isoformat()
         
         if outcome == "LOSS":
             self.s["consec"] += 1
