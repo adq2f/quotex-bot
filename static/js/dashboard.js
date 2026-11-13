@@ -86,6 +86,7 @@
         $('sel-timeframe').addEventListener('change', () => { $('lbl-strategy').textContent = label(+$('sel-timeframe').value); });
         $('sw-mtg').addEventListener('change', async () => { await save({ mtg_enabled: $('sw-mtg').checked }); refresh(); });
         
+        // পেজ লোড হওয়ার সময় ডাটাবেস থেকে সেটিংস নিয়ে আসবে
         fetch('/api/settings', { credentials: 'same-origin' }).then(r => r.json()).then(s => {
             $('sw-mtg').checked = !!s.mtg_enabled;
             if (s.web_timeframe_seconds) { $('sel-timeframe').value = String(s.web_timeframe_seconds); $('lbl-strategy').textContent = label(s.web_timeframe_seconds); }
