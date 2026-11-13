@@ -29,15 +29,17 @@ from bot.tracker import Signal, Tracker, outcome_for, pnl_for
 from bot.controller import BotController
 from bot.webapp import create_app
 
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
 
 class Bot:
     def __init__(self, cfg=settings, source=None, telegram=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
-        log("BOT_STARTUP", VERSION="FINAL-V8-MEMORY")
+        log("BOT_STARTUP", VERSION="FINAL-MEMORY-LIMIT")
         
         if self.source is None:
             try:
@@ -287,7 +289,7 @@ class Bot:
                     
                 if self.signals_sent_today >= self.cfg.max_signals_per_day:
                     if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
-                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow.")
+                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
                         self.send_daily_summary(now)
             except Exception as e:
                 log("resolve_error", id=sig.id, error=str(e)[:200])
@@ -485,12 +487,14 @@ class Bot:
             except Exception as e: log("cycle_error", error=str(e)[:300])
         log("bot_loop_exited")
 
+
 def main():
     bot = Bot()
     controller = BotController(bot)
     controller.start_thread()
     app = create_app(bot, controller)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
 
 if __name__ == "__main__":
     main()
