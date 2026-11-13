@@ -1,5 +1,5 @@
 """
-strategy_quick.py  --  1-min scalping with H4-dominant HTF bias.
+strategy_quick.py  --  1-min scalping with H4-dominant HTF bias. (FIXED & STRICTER)
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,14 +21,14 @@ class QuickDecision:
 
 
 class QuickStrategy:
-    MIN_CONFLUENCE = 2
-    RSI_BUY = 35.0
-    RSI_SELL = 65.0
+    MIN_CONFLUENCE = 3       
+    RSI_BUY = 30.0           
+    RSI_SELL = 70.0          
     BB_PROXIMITY = 0.10
     STOCH_LOW = 25.0
     STOCH_HIGH = 75.0
 
-    ADX_MIN = 18.0
+    ADX_MIN = 25.0           
     ATR_MIN_RATIO = 0.65
     ATR_MAX_RATIO = 2.5
 
@@ -101,7 +101,6 @@ class QuickStrategy:
         return False
 
     def _htf_bias(self, h1, h4):
-        """H4 dominant, H1 veto only if opposite."""
         if len(h4) < 60:
             return "UNKNOWN"
         h4_e20 = float(self._ema(h4["close"], 20).iloc[-1])
@@ -138,7 +137,6 @@ class QuickStrategy:
 
         if not self._session_ok(now):
             d.gate = "session"
-            d.notes = f"outside session (UTC hour {now.hour:02d})"
             return d
 
         close = m5["close"]
@@ -154,8 +152,7 @@ class QuickStrategy:
 
         i = len(close) - 1
         c = float(close.iloc[i])
-        e5, e10, e20, e50 = (float(ema5.iloc[i]), float(ema10.iloc[i]),
-                             float(ema20.iloc[i]), float(ema50.iloc[i]))
+        e5, e10, e20, e50 = (float(ema5.iloc[i]), float(ema10.iloc[i]), float(ema20.iloc[i]), float(ema50.iloc[i]))
         r = float(rsi.iloc[i])
         mh = float(hist.iloc[i])
         bu, bl = float(bb_up.iloc[i]), float(bb_lo.iloc[i])
@@ -166,7 +163,6 @@ class QuickStrategy:
 
         if np.isnan(adx_val) or adx_val < self.ADX_MIN:
             d.gate = "low_adx"
-            d.notes = f"ADX={adx_val:.1f}<{self.ADX_MIN}"
             return d
 
         atr_vals = atr_s.dropna()
@@ -175,31 +171,20 @@ class QuickStrategy:
             avg_atr = float(atr_vals.iloc[-21:-1].mean())
             if avg_atr > 0:
                 ratio = cur_atr / avg_atr
-                if ratio < self.ATR_MIN_RATIO:
-                    d.gate = "low_atr"
-                    d.notes = f"ATR ratio={ratio:.2f}"
-                    return d
-                if ratio > self.ATR_MAX_RATIO:
-                    d.gate = "atr_spike"
-                    d.notes = f"ATR ratio={ratio:.2f}"
+                if ratio < self.ATR_MIN_RATIO or ratio > self.ATR_MAX_RATIO:
+                    d.gate = "atr_filter"
                     return d
 
         bias = self._htf_bias(h1, h4) if self.REQUIRE_HTF_BIAS else "UNKNOWN"
-        if bias == "UNKNOWN":
-            d.gate = "htf_warmup"
-            d.notes = "HTF data not ready"
-            return d
-        if self.REQUIRE_HTF_BIAS and bias == "NEUTRAL":
+        if bias == "UNKNOWN" or (self.REQUIRE_HTF_BIAS and bias == "NEUTRAL"):
             d.gate = "htf_neutral"
-            d.notes = "H4 neutral or H1 opposite"
             return d
 
         band_width = bu - bl
         near_upper = (bu - c) <= band_width * self.BB_PROXIMITY
         near_lower = (c - bl) <= band_width * self.BB_PROXIMITY
 
-        buy = 0
-        sell = 0
+        buy, sell = 0, 0
         if e5 > e10 > e50 and c > e5: buy += 1
         elif e5 < e10 < e50 and c < e5: sell += 1
         if r < self.RSI_BUY: buy += 1
@@ -211,41 +196,26 @@ class QuickStrategy:
         if sk < self.STOCH_LOW and sk > sd: buy += 1
         elif sk > self.STOCH_HIGH and sk < sd: sell += 1
 
-        m5_bull = (c > e20) and (e5 > e20)
-        m5_bear = (c < e20) and (e5 < e20)
-        m5_ok_buy = m5_bull if self.REQUIRE_M5_ALIGNMENT else True
-        m5_ok_sell = m5_bear if self.REQUIRE_M5_ALIGNMENT else True
-
-        buy_momentum = (e5 > e10) or (mh > 0)
-        sell_momentum = (e5 < e10) or (mh < 0)
-        mom_ok_buy = buy_momentum if self.REQUIRE_MOMENTUM else True
-        mom_ok_sell = sell_momentum if self.REQUIRE_MOMENTUM else True
-
+        m5_ok_buy = (c > e20) and (e5 > e20) if self.REQUIRE_M5_ALIGNMENT else True
+        m5_ok_sell = (c < e20) and (e5 < e20) if self.REQUIRE_M5_ALIGNMENT else True
+        mom_ok_buy = (e5 > e10) or (mh > 0) if self.REQUIRE_MOMENTUM else True
+        mom_ok_sell = (e5 < e10) or (mh < 0) if self.REQUIRE_MOMENTUM else True
         di_buy_ok = (pdi > mdi) if self.REQUIRE_DI_AGREE else True
         di_sell_ok = (mdi > pdi) if self.REQUIRE_DI_AGREE else True
-
         bias_ok_buy = (bias == "BULLISH") if self.REQUIRE_HTF_BIAS else True
         bias_ok_sell = (bias == "BEARISH") if self.REQUIRE_HTF_BIAS else True
 
-        if (buy >= self.MIN_CONFLUENCE and bias_ok_buy and m5_ok_buy
-                and mom_ok_buy and di_buy_ok):
+        if (buy >= self.MIN_CONFLUENCE and bias_ok_buy and m5_ok_buy and mom_ok_buy and di_buy_ok):
             d.decision = "BUY"
             d.score = 50 + buy * 10
-            d.notes = (f"BUY {buy}/5 ADX={adx_val:.0f} bias={bias} "
-                       f"RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f}")
+            d.notes = f"BUY {buy}/5 ADX={adx_val:.0f} bias={bias} RSI={r:.0f}"
             return d
 
-        if (sell >= self.MIN_CONFLUENCE and bias_ok_sell and m5_ok_sell
-                and mom_ok_sell and di_sell_ok):
+        if (sell >= self.MIN_CONFLUENCE and bias_ok_sell and m5_ok_sell and mom_ok_sell and di_sell_ok):
             d.decision = "SELL"
             d.score = 50 + sell * 10
-            d.notes = (f"SELL {sell}/5 ADX={adx_val:.0f} bias={bias} "
-                       f"RSI={r:.0f} MACD={mh:+.5f} Stoch={sk:.0f}/{sd:.0f}")
+            d.notes = f"SELL {sell}/5 ADX={adx_val:.0f} bias={bias} RSI={r:.0f}"
             return d
 
         d.gate = "filtered"
-        d.notes = (f"buy={buy} sell={sell} bias={bias} ADX={adx_val:.0f} "
-                   f"m5B={m5_ok_buy} m5S={m5_ok_sell} "
-                   f"momB={mom_ok_buy} momS={mom_ok_sell} "
-                   f"diB={di_buy_ok} diS={di_sell_ok}")
         return d
