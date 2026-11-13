@@ -6,6 +6,7 @@ from functools import wraps
 
 from flask import Flask, jsonify, request, render_template, redirect, url_for, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
+import dataclasses
 
 from . import features as fx
 from .config import strategy_for_timeframe
@@ -139,6 +140,8 @@ def create_app(bot, controller: BotController) -> Flask:
             if ms < 1 or ms > 100:
                 return jsonify({"error": "invalid max_signals_per_day"}), 400
             store.set_setting("max_signals_per_day", ms)
+            # সরাসরি বটের কনফিগে আপডেট করে দেওয়া হলো যাতে সাথে সাথে কাজ করে
+            bot.cfg = dataclasses.replace(bot.cfg, max_signals_per_day=ms)
             
         bot._build_strategy()
         return jsonify({"ok": True, "applied": {
