@@ -71,8 +71,10 @@ class Bot:
             tf = 300
         mode = strategy_for_timeframe(tf)
         mtg = bool(store.get_setting("mtg_enabled", self.cfg.mtg_enabled))
+        max_sig = int(store.get_setting("max_signals_per_day", self.cfg.max_signals_per_day))
+        
         self.cfg = replace(self.cfg, web_timeframe_seconds=tf, entry_tf_seconds=tf,
-                           strategy_mode=mode, mtg_enabled=mtg)
+                           strategy_mode=mode, mtg_enabled=mtg, max_signals_per_day=max_sig)
         self.risk.cfg = self.cfg
         self.executor.cfg = self.cfg
         if mode == "quick":
@@ -81,7 +83,7 @@ class Bot:
         else:
             self.strategy = Strategy(self.cfg, self.news)
         fx.attach_precheck(self.strategy)
-        log("strategy_built", mode=mode, tf=tf, mtg=mtg, assets=len(self.cfg.whitelist))
+        log("strategy_built", mode=mode, tf=tf, mtg=mtg, max_sig=max_sig, assets=len(self.cfg.whitelist))
 
     def _tz(self): return self.cfg.display_utc_offset_hours
 
@@ -131,7 +133,6 @@ class Bot:
             
         line = "🟢⬆️  UP  (BUY / CALL)" if sig.direction == "BUY" else "🔴⬇️  DOWN  (SELL / PUT)"
         
-        # --- Hybrid System: Premium vs Normal Signal ---
         score = getattr(sig, "score", 0)
         if score >= 85:
             signal_type = "🔥 <b>PREMIUM SIGNAL (High Accuracy)</b>"
@@ -208,7 +209,6 @@ class Bot:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         
-        # Top 1 pair only to avoid spam
         if not candidates:
             return
         top_candidates = candidates[:1]
@@ -258,9 +258,11 @@ class Bot:
             if not created:
                 fx.maybe_history_report(self)
                 
-            # Check if daily limit reached to send final report
+            # Max Signal Limit Hit Check
             if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
-                self.send_daily_summary(now)
+                if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
+                    self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow (00:00 UTC).")
+                    self.send_daily_summary(now)
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
@@ -313,6 +315,10 @@ class Bot:
         if self.tracker.pending:
             self.diag["pending_trade"] += 1
             return
+        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+            self.diag["daily_limit_reached"] += 1
+            return
+            
         started, tried, empty, errors, cands = time.time(), 0, 0, 0, []
         bad = fx.bad_assets(self)
         for asset in cfg.whitelist:
@@ -390,7 +396,7 @@ class Bot:
         """দৈনিক টার্গেট শেষ হলে বা দিনশেষে সামারি রিপোর্ট পাঠাবে"""
         today = now.strftime("%Y-%m-%d")
         if self.store.kv_get("last_daily_summary") == today:
-            return # আজকে একবারই পাঠাবে
+            return 
             
         rows = self.store.signal_rows(today)
         if not rows:
@@ -403,8 +409,8 @@ class Bot:
         losses = sum(1 for r in rows if r["status"] == "LOSS")
         draws = sum(1 for r in rows if r["status"] == "DRAW")
         pnl = sum(r["pnl"] for r in rows)
+        win_rate = round((wins / (wins + losses) * 100), 1) if (wins + losses) > 0 else 0
         
-        # Per asset breakdown
         assets = {}
         for r in rows:
             a = r["asset"]
@@ -416,8 +422,9 @@ class Bot:
 
         msg = f"📊 <b>DAILY SIGNAL REPORT - {today}</b>\n"
         msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += f"Total Signals: <b>{total}</b>\n"
+        msg += f"Total Signals: <b>{total}</b> (Max: {self.cfg.max_signals_per_day})\n"
         msg += f"✅ Wins: <b>{wins}</b> | ❌ Losses: <b>{losses}</b> | ➖ Draws: <b>{draws}</b>\n"
+        msg += f"🎯 Win Rate: <b>{win_rate}%</b>\n"
         msg += f"💰 Net P/L: <b>{pnl:+.2f}$</b>\n"
         msg += f"━━━━━━━━━━━━━━━━━━\n"
         msg += f"<b>Market Breakdown:</b>\n"
