@@ -58,10 +58,6 @@ class Bot:
         self.pause_event.set()
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
-        
-        # নতুন: রেজাল্টের পর ৩ মিনিট গ্যাপ রাখার জন্য ভেরিয়েবল
-        self.last_result_time = None 
-        
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -140,9 +136,9 @@ class Bot:
         # Hybrid System (Normal vs High Accuracy)
         score = getattr(sig, "score", 0)
         if score >= 85:
-            signal_type = "🔥 <b>High Accuracy Signal ✅</b>"
+            signal_type = "🔥🔥 <b>HIGH ACCURACY SIGNAL ✅</b> 🔥🔥"
         else:
-            signal_type = "⚡ <b>Normal Signal</b>"
+            signal_type = "⚡ <b>NORMAL SIGNAL</b> ⚡"
             
         feed = self.feed_label()
         warn = ""
@@ -188,6 +184,12 @@ class Bot:
             return
         if self.tracker.pending:
             return
+        # গ্লোবাল কুলডাউন চেক (৩ মিনিট)
+        last_res = self.risk.s.get("last_result_time")
+        if last_res:
+            if (now - datetime.fromisoformat(last_res)) <= timedelta(minutes=3):
+                return
+                
         peek = getattr(self.source, "get_candles_peek", None)
         if peek is None: return
         bad = fx.bad_assets(self)
@@ -239,23 +241,14 @@ class Bot:
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
-                m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 120, now)
+                # ১০০% রেজাল্ট নিশ্চিত করতে বর্তমান ক্লোজড ক্যান্ডেল নেওয়া হচ্ছে
+                m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
             except Exception as e:
                 log("resolve_fetch_failed", id=sig.id, error=str(e)[:200])
                 continue
                 
-            exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)
-            
-            valid_candles = m5[m5.index <= exp]
-            if len(valid_candles) == 0:
-                sig.tries += 1
-                if sig.tries >= 3:
-                    self.tracker.close(sig, "VOID")
-                else:
-                    self.tracker.update(sig)
-                continue
+            if len(m5) == 0: continue
                 
-            m5 = valid_candles
             exit_price = float(m5["close"].iloc[-1])
             outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
             pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
@@ -263,9 +256,6 @@ class Bot:
             self.tracker.close(sig, outcome, exit_price, pnl)
             log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
             self._send_result(sig, m5, outcome, pnl)
-            
-            # নতুন: রেজাল্ট আসার সময় সেভ করে রাখা (গ্যাপ দেওয়ার জন্য)
-            self.last_result_time = now
             
             created = False
             if outcome == "LOSS":
@@ -318,11 +308,13 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
-        # নতুন: শেষ রেজাল্ট আসার ৩ মিনিট (১৮০ সেকেন্ড) পর্যন্ত নতুন সিগন্যাল খুঁজবে না
-        if self.last_result_time and (now - self.last_result_time).total_seconds() < 180:
-            self.diag["waiting_gap"] += 1
-            return
-            
+        # গ্লোবাল ৩ মিনিট কুলডাউন
+        last_res = self.risk.s.get("last_result_time")
+        if last_res:
+            if (now - datetime.fromisoformat(last_res)) <= timedelta(minutes=3):
+                self.diag["waiting_gap"] += 1
+                return
+                
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
