@@ -1,11 +1,8 @@
 """
 main.py  --  Web app + bot thread. Signals via Telegram + dashboard.
-v3: MTG1 switch from the website, 10s MTG heads-up, history every 10 signals, weak-asset filter,
-    optional live Quotex feed (falls back to biquote).
 """
 import sys
 import os
-
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import threading
@@ -67,7 +64,6 @@ class Bot:
     def feed_label(self) -> str:
         return getattr(self.source, "label", "Real market (biquote)") if self.source else "none"
 
-    # ------------------------------------------------------------------ strategy (also applies web settings)
     def _build_strategy(self):
         store = self.store
         tf = int(store.get_setting("web_timeframe_seconds", self.cfg.web_timeframe_seconds) or 300)
@@ -87,7 +83,6 @@ class Bot:
         fx.attach_precheck(self.strategy)
         log("strategy_built", mode=mode, tf=tf, mtg=mtg, assets=len(self.cfg.whitelist))
 
-    # ------------------------------------------------------------------ helpers
     def _tz(self): return self.cfg.display_utc_offset_hours
 
     def _expiry_text(self):
@@ -123,7 +118,6 @@ class Bot:
                 "fvg": list(s.fvg) if s.fvg else None, "fvg_time": t(s.fvg_idx),
                 "sweep_level": s.sweep_level, "sweep_time": t(s.sweep_idx)}
 
-    # ------------------------------------------------------------------ messages
     def _send_signal(self, sig, m5):
         path = os.path.join(self.cfg.charts_dir, f"sig_{sig.id}.png")
         info = {"asset": sig.asset, "direction": sig.direction, "score": sig.score, "step": sig.step,
@@ -134,17 +128,28 @@ class Bot:
         except Exception as e:
             log("chart_failed", error=str(e)[:200])
             path = ""
+            
         line = "🟢⬆️  UP  (BUY / CALL)" if sig.direction == "BUY" else "🔴⬇️  DOWN  (SELL / PUT)"
+        
+        # --- Hybrid System: Premium vs Normal Signal ---
+        score = getattr(sig, "score", 0)
+        if score >= 85:
+            signal_type = "🔥 <b>PREMIUM SIGNAL (High Accuracy)</b>"
+        else:
+            signal_type = "⚡ <b>NORMAL SIGNAL (Quick Scalp)</b>"
+            
         feed = self.feed_label()
         warn = ""
         if sig.asset.lower().endswith("_otc") and feed.startswith("Real"):
             warn = "\n⚠️ OTC pair on a real-market feed: Quotex OTC price may differ"
         mtg_tag = f"  ·  MTG{sig.step}" if sig.step else ""
-        cap = (f"📢 <b>SIGNAL{mtg_tag}</b>\n━━━━━━━━━━━━━━━━━━\n<b>{line}</b>\n"
+        
+        cap = (f"📢 <b>SIGNAL{mtg_tag}</b>\n{signal_type}\n━━━━━━━━━━━━━━━━━━\n<b>{line}</b>\n"
                f"Pair: <b>{sig.asset}</b>\nTimeframe: {self.cfg.entry_tf_seconds // 60} min\n"
                f"Entry: <b>NOW</b> @ {sig.entry_price:.5f}\nExpiry: {self._expiry_text()}\n"
                f"Confidence: <b>{sig.score}%</b>\nStake: ${sig.stake:.2f}\nFeed: {feed}{warn}\n"
                f"━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
+               
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
@@ -170,7 +175,6 @@ class Bot:
         else:
             self.tg.message(cap)
 
-    # ------------------------------------------------------------------ pre-scan ("entry in Ns" heads-up)
     def _pre_scan(self, now):
         cfg = self.cfg
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
@@ -203,14 +207,19 @@ class Bot:
             except Exception as e:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
         candidates.sort(key=lambda x: x[0].score, reverse=True)
-        for d, entry_time in candidates[:cfg.prepare_max_per_cycle]:
+        
+        # Top 1 pair only to avoid spam
+        if not candidates:
+            return
+        top_candidates = candidates[:1]
+        
+        for d, entry_time in top_candidates:
             secs = int((entry_time - now).total_seconds())
             line = "🟢⬆️ UP (BUY)" if d.decision == "BUY" else "🔴⬇️ DOWN (SELL)"
             self.tg.message(f"⏰ <b>ENTRY IN {secs}s</b>\n{line}\nPair: <b>{d.asset}</b>\n"
                             f"Confidence: {d.score}%\n<i>Heads-up only: final signal comes after the candle closes.</i>")
             log("prepare_sent", asset=d.asset, direction=d.decision, seconds=secs)
 
-    # ------------------------------------------------------------------ resolve + MTG
     def resolve_due(self, now):
         cfg = self.cfg
         if self.source is None:
@@ -238,6 +247,7 @@ class Bot:
             self.tracker.close(sig, outcome, exit_price, pnl)
             log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
             self._send_result(sig, m5, outcome, pnl)
+            
             created = False
             if outcome == "LOSS":
                 before = len(self.tracker.pending)
@@ -247,6 +257,10 @@ class Bot:
                     self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset} (conditions not valid)")
             if not created:
                 fx.maybe_history_report(self)
+                
+            # Check if daily limit reached to send final report
+            if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+                self.send_daily_summary(now)
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
@@ -291,7 +305,6 @@ class Bot:
         self._htf = {}
         log("source_reconnected", feed=self.feed_label())
 
-    # ------------------------------------------------------------------ scan
     def scan(self, now):
         cfg = self.cfg
         if self.source is None:
@@ -312,11 +325,9 @@ class Bot:
             except Exception as e:
                 errors += 1
                 self.diag["frames_exception"] += 1
-                log("scan_frames_error", asset=asset, error=str(e)[:200])
                 continue
             if m5 is None or len(m5) == 0:
                 empty += 1
-                self.diag["empty_m5"] += 1
                 continue
             if len(h1) < 50 or len(h4) < 50:
                 self.diag["short_htf"] += 1
@@ -325,8 +336,6 @@ class Bot:
                 d = self.strategy.evaluate(asset, m5, h1, h4, now)
             except Exception as e:
                 errors += 1
-                self.diag["evaluate_exception"] += 1
-                log("scan_eval_error", asset=asset, error=str(e)[:200])
                 continue
             gate = getattr(d, "gate", "") or ""
             self.diag[gate or d.decision] += 1
@@ -336,20 +345,17 @@ class Bot:
             self.store.log_decision(asset, d.decision, d.score, gate, payload)
             if d.decision != "HOLD":
                 cands.append((d, m5))
-        log("scan_completed", tried=tried, empty=empty, errors=errors, candidates=len(cands),
-            skipped_weak=len(bad), elapsed_sec=round(time.time() - started, 1))
+                
         if not cands:
             return
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
-            log("signal_stale", asset=d.asset, age=round(age, 1))
             self.diag["stale_signal"] += 1
             return
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
         if not ok:
-            log("risk_block", asset=d.asset, status=status)
             self.diag["risk_block"] += 1
             return
         stake = self.risk.base_stake(d.asset, payout)
@@ -365,7 +371,6 @@ class Bot:
         self._send_signal(sig, m5)
         log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=stake)
 
-    # ------------------------------------------------------------------ reports
     def summary_numbers(self, since_iso=None):
         rows = self.store.signal_rows(since_iso)
 
@@ -381,22 +386,55 @@ class Bot:
         return {"all": agg(rows), "base": agg([r for r in rows if r["step"] == 0]),
                 "mtg": agg([r for r in rows if r["step"] > 0])}
 
+    def send_daily_summary(self, now):
+        """দৈনিক টার্গেট শেষ হলে বা দিনশেষে সামারি রিপোর্ট পাঠাবে"""
+        today = now.strftime("%Y-%m-%d")
+        if self.store.kv_get("last_daily_summary") == today:
+            return # আজকে একবারই পাঠাবে
+            
+        rows = self.store.signal_rows(today)
+        if not rows:
+            return
+
+        self.store.kv_set("last_daily_summary", today)
+        
+        total = len(rows)
+        wins = sum(1 for r in rows if r["status"] == "WIN")
+        losses = sum(1 for r in rows if r["status"] == "LOSS")
+        draws = sum(1 for r in rows if r["status"] == "DRAW")
+        pnl = sum(r["pnl"] for r in rows)
+        
+        # Per asset breakdown
+        assets = {}
+        for r in rows:
+            a = r["asset"]
+            if a not in assets:
+                assets[a] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if r["status"] == "WIN": assets[a]["wins"] += 1
+            elif r["status"] == "LOSS": assets[a]["losses"] += 1
+            assets[a]["pnl"] += r["pnl"]
+
+        msg = f"📊 <b>DAILY SIGNAL REPORT - {today}</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg += f"Total Signals: <b>{total}</b>\n"
+        msg += f"✅ Wins: <b>{wins}</b> | ❌ Losses: <b>{losses}</b> | ➖ Draws: <b>{draws}</b>\n"
+        msg += f"💰 Net P/L: <b>{pnl:+.2f}$</b>\n"
+        msg += f"━━━━━━━━━━━━━━━━━━\n"
+        msg += f"<b>Market Breakdown:</b>\n"
+
+        for a, data in assets.items():
+            msg += f"🔹 <b>{a}</b>: {data['wins']}W - {data['losses']}L | {data['pnl']:+.2f}$\n"
+
+        self.tg.message(msg)
+
     def daily_report(self, now):
         cfg = self.cfg
         today = now.strftime("%Y-%m-%d")
         if now.hour < cfg.daily_report_hour_utc or self.store.kv_get("last_report") == today:
             return
         self.store.kv_set("last_report", today)
-        s = self.summary_numbers(today)
+        self.send_daily_summary(now)
 
-        def line(n, a):
-            return (f"{n}: W{a['win']} L{a['loss']} D{a['draw']}  "
-                    f"WR {a['win_rate'] if a['win_rate'] is not None else '-'}%  P/L ${a['pnl']}")
-        self.tg.message(f"📈 <b>Daily Report · {today}</b>\n━━━━━━━━━━━━━━━━━━\n"
-                        f"{line('Total', s['all'])}\n{line('Base', s['base'])}\n{line('MTG', s['mtg'])}\n"
-                        f"━━━━━━━━━━━━━━━━━━\nBalance: ${self.risk.balance:.2f}")
-
-    # ------------------------------------------------------------------ loop
     def cycle(self, now=None):
         now = now or utcnow()
         if self.source is None:
