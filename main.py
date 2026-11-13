@@ -39,6 +39,10 @@ class Bot:
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
+        
+        # --- NEW VERSION LOG ---
+        log("BOT_STARTUP", VERSION="2024-11-13-V4-FINAL")
+        
         if self.source is None:
             try:
                 self.source = make_source(cfg, self.store)
@@ -59,16 +63,15 @@ class Bot:
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
         
-        # --- Force clear stuck signals from DB on startup ---
+        # ডাটাবেস থেকে টাইমার লোড করা (যাতে রিস্টার্টেও মুছে না যায়)
+        self.last_signal_time = float(self.store.kv_get("last_signal_time", 0))
+        self.last_result_time = float(self.store.kv_get("last_result_time", 0))
+        
+        # আটকে থাকা সিগন্যাল ক্লিয়ার
         if self.tracker.pending:
-            log("clearing_stuck_signals", count=len(self.tracker.pending))
             for s in list(self.tracker.pending):
                 self.tracker.close(s, "VOID")
                 
-        # মেমরি-ভিত্তিক টাইমার (৩ মিনিট গ্যাপ নিশ্চিত করতে)
-        self.last_signal_time = 0
-        self.last_result_time = 0
-        
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -95,7 +98,6 @@ class Bot:
         else:
             self.strategy = Strategy(self.cfg, self.news)
         fx.attach_precheck(self.strategy)
-        log("strategy_built", mode=mode, tf=tf, mtg=mtg, max_sig=max_sig, assets=len(self.cfg.whitelist))
 
     def _tz(self): return self.cfg.display_utc_offset_hours
 
@@ -144,27 +146,32 @@ class Bot:
             
         line = "🟢⬆️  UP  (BUY / CALL)" if sig.direction == "BUY" else "🔴⬇️  DOWN  (SELL / PUT)"
         
-        # Hybrid System (Normal vs High Accuracy)
         score = getattr(sig, "score", 0)
         if score >= 85:
-            signal_type = "🔥🔥 <b>HIGH ACCURACY SIGNAL ✅</b> 🔥🔥"
+            signal_type = "🔥🔥 HIGH ACCURACY SIGNAL ✅ 🔥🔥"
         else:
-            signal_type = "⚡ <b>NORMAL SIGNAL</b> ⚡"
+            signal_type = "⚡ NORMAL SIGNAL ⚡"
             
         feed = self.feed_label()
-        warn = ""
-        if sig.asset.lower().endswith("_otc") and feed.startswith("Real"):
-            warn = "\n⚠️ OTC pair on a real-market feed: Quotex OTC price may differ"
         mtg_tag = f"  ·  MTG{sig.step}" if sig.step else ""
         
-        cap = (f"📢 <b>SIGNAL{mtg_tag}</b>\n{signal_type}\n━━━━━━━━━━━━━━━━━━\n<b>{line}</b>\n"
-               f"Pair: <b>{sig.asset}</b>\nTimeframe: {self.cfg.entry_tf_seconds // 60} min\n"
-               f"Entry: <b>NOW</b> @ {sig.entry_price:.5f}\nExpiry: {self._expiry_text()}\n"
-               f"Confidence: <b>{sig.score}%</b>\nStake: ${sig.stake:.2f}\nFeed: {feed}{warn}\n"
+        cap = (f"📢 SIGNAL{mtg_tag}\n"
+               f"<b>{signal_type}</b>\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"<b>{line}</b>\n"
+               f"Pair: <b>{sig.asset}</b>\n"
+               f"Timeframe: {self.cfg.entry_tf_seconds // 60} min\n"
+               f"Entry: <b>NOW</b> @ {sig.entry_price:.5f}\n"
+               f"Expiry: {self._expiry_text()}\n"
+               f"Confidence: <b>{sig.score}%</b>\n"
+               f"Stake: ${sig.stake:.2f}\n"
+               f"Feed: {feed}\n"
                f"━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
                
         if path and os.path.exists(path):
-            self.tg.photo(path, cap)
+            self.tg.photo(path, "")
+            time.sleep(1) # ১ সেকেন্ড গ্যাপ
+            self.tg.message(cap)
         else:
             self.tg.message(cap)
 
@@ -177,14 +184,19 @@ class Bot:
         except Exception as e:
             log("chart_failed", error=str(e)[:200])
             path = ""
-        header = {"WIN": "✅ <b>WIN</b>", "LOSS": "❌ <b>LOSS</b>"}.get(outcome, "➖ <b>DRAW</b>")
-        if outcome == "WIN" and sig.step:
-            header = "🔁✅ <b>MTG1 WIN</b>"
+        header = {"WIN": "✅ WIN", "LOSS": "❌ LOSS"}.get(outcome, "➖ DRAW")
         pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
-        cap = (f"{header}\n━━━━━━━━━━━━━━━━━━\nPair: <b>{sig.asset}</b>\nResult: <b>{pnl_str}</b>\n"
-               f"Balance: ${self.risk.balance:.2f}\n━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
+        cap = (f"<b>{header}</b>\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"Pair: <b>{sig.asset}</b>\n"
+               f"Result: <b>{pnl_str}</b>\n"
+               f"Balance: ${self.risk.balance:.2f}\n"
+               f"━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
+               
         if path and os.path.exists(path):
-            self.tg.photo(path, cap)
+            self.tg.photo(path, "")
+            time.sleep(1)
+            self.tg.message(cap)
         else:
             self.tg.message(cap)
 
@@ -196,7 +208,7 @@ class Bot:
         if self.tracker.pending:
             return
         
-        # মেমরি-ভিত্তিক কুলডাউন (সিগন্যাল বা রেজাল্টের ৩ মিনিট পর)
+        # ৩ মিনিট গ্যাপ চেক
         if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             return
             
@@ -218,7 +230,7 @@ class Bot:
                 if entry_time <= now: continue
                 candidates.append((d, entry_time, m5))
             except Exception as e:
-                log("pre_scan_error", asset=asset, error=str(e)[:200])
+                pass
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         
         if not candidates: return
@@ -226,7 +238,6 @@ class Bot:
         d, entry_time, m5_peek = top
         self._pre_scan_candidate = (d.asset, d.decision)
         
-        # Watch Market এর জন্য ছবি তৈরি
         path = os.path.join(self.cfg.charts_dir, f"watch_{d.asset}.png")
         info = {"asset": d.asset, "direction": d.decision, "score": d.score, "step": 0,
                 "tf_seconds": cfg.entry_tf_seconds, "entry_price": d.entry_price,
@@ -234,7 +245,6 @@ class Bot:
         try:
             render_signal_chart(m5_peek, info, path, self._tz())
         except Exception as e:
-            log("pre_scan_chart_failed", error=str(e)[:200])
             path = ""
             
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
@@ -243,15 +253,12 @@ class Bot:
             self.tg.photo(path, cap)
         else:
             self.tg.message(cap)
-            
-        log("prepare_watch_sent", asset=d.asset, direction=d.decision)
 
     def resolve_due(self, now):
         cfg = self.cfg
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
-                # ১০০% রেজাল্ট নিশ্চিত করতে বর্তমান ক্লোজড ক্যান্ডেল নেওয়া হচ্ছে
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
                 if len(m5) == 0: continue
                 
@@ -261,10 +268,11 @@ class Bot:
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 self.tracker.close(sig, outcome, exit_price, pnl)
                 
-                # রেজাল্ট টাইম সেভ করা (৩ মিনিট গ্যাপ নিশ্চিত করতে)
+                # রেজাল্ট টাইম ডাটাবেসে সেভ
                 self.last_result_time = time.time()
+                self.store.kv_set("last_result_time", self.last_result_time)
                 
-                log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
+                log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
                 self._send_result(sig, m5, outcome, pnl)
                 
                 created = False
@@ -272,8 +280,6 @@ class Bot:
                     before = len(self.tracker.pending)
                     self._try_mtg(sig, now)
                     created = len(self.tracker.pending) > before
-                    if not created and cfg.mtg_enabled and sig.step < cfg.mtg_max_steps:
-                        self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset}")
                 if not created:
                     fx.maybe_history_report(self)
                     
@@ -307,24 +313,14 @@ class Bot:
         self.executor.execute(ms)
         self._send_signal(ms, m5)
 
-    def reconnect_source(self):
-        try:
-            if self.source is not None: self.source.close()
-        except: pass
-        self.source = make_source(self.cfg, self.store)
-        self.executor.source = self.source
-        self._htf = {}
-        log("source_reconnected", feed=self.feed_label())
-
     def scan(self, now):
         cfg = self.cfg
         if self.source is None: return
         
-        # মেমরি-ভিত্তিক ৩ মিনিট গ্যাপ
-        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
-            self.diag["waiting_gap"] += 1
-            return
-            
+        # ডাটাবেস থেকে টাইমার রিলোড (নিরাপত্তার জন্য)
+        self.last_signal_time = float(self.store.kv_get("last_signal_time", 0))
+        self.last_result_time = float(self.store.kv_get("last_result_time", 0))
+        
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
@@ -362,11 +358,12 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
-        # সিগন্যাল টাইম সেভ করা
+        # সিগন্যাল টাইম ডাটাবেসে সেভ
         self.last_signal_time = time.time()
+        self.store.kv_set("last_signal_time", self.last_signal_time)
         
+        log("SIGNAL_SENT", id=sig.id, asset=d.asset, direction=d.decision, score=d.score)
         self._send_signal(sig, m5)
-        log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=stake)
 
     def summary_numbers(self, since_iso=None):
         rows = self.store.signal_rows(since_iso)
@@ -465,21 +462,21 @@ class Bot:
                     except Exception as e:
                         log("pre_scan_cycle_error", error=str(e)[:300])
 
-            alert_sec = int(os.getenv("MTG_ALERT_SECONDS", "10"))
-            if alert_sec > 0 and self.cfg.mtg_enabled and self.tracker.pending:
-                at = next_boundary - alert_sec
-                while time.time() < at and not self.stop_event.is_set():
-                    time.sleep(min(0.5, max(0.0, at - time.time())))
-                if not self.stop_event.is_set():
-                    try: fx.pre_mtg_alert(self, utcnow())
-                    except: pass
-                        
             while time.time() < next_boundary and not self.stop_event.is_set():
                 if self.cfg.entry_tf_seconds != tf: break
                 time.sleep(min(0.5, max(0.0, next_boundary - time.time())))
                 
             if self.stop_event.is_set(): break
             if self.cfg.entry_tf_seconds != tf: continue
+            
+            # ৩ মিনিটের কড়া গ্যাপ (মেইন লুপে)
+            self.last_signal_time = float(self.store.kv_get("last_signal_time", 0))
+            self.last_result_time = float(self.store.kv_get("last_result_time", 0))
+            
+            if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
+                log("GAP_ACTIVE", sec_since_sig=round(time.time() - self.last_signal_time), sec_since_res=round(time.time() - self.last_result_time))
+                continue
+                
             time.sleep(max(0.0, self.cfg.scan_delay_seconds))
             try: self.cycle()
             except Exception as e: log("cycle_error", error=str(e)[:300])
