@@ -1,107 +1,71 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — Quotex Signal Bot{% endblock %}
 {% block content %}
-
-<div class="row g-3 mb-3">
-    <div class="col-md-8">
-        <div class="card border-secondary">
-            <div class="card-body">
-                <h5 class="card-title mb-3">Bot Control</h5>
-                <div class="d-flex align-items-center gap-3 flex-wrap">
-                    <span id="bot-status-pill" class="badge bg-secondary fs-6">Loading…</span>
-                    <button id="btn-start" class="btn btn-success btn-sm">▶️ Start</button>
-                    <button id="btn-stop"  class="btn btn-warning btn-sm">⏸ Pause</button>
-                    <button id="btn-refresh" class="btn btn-outline-secondary btn-sm">🔄 Refresh</button>
-                    <span class="ms-auto text-secondary small" id="last-updated">—</span>
-                </div>
-                <div class="row mt-3 small text-secondary g-2">
-                    <div class="col-auto">Mode: <strong id="mode" class="text-light">—</strong></div>
-                    <div class="col-auto">Account: <strong id="account" class="text-light">—</strong></div>
-                    <div class="col-auto">MTG: <strong id="mtg" class="text-light">—</strong></div>
-                    <div class="col-auto">Assets: <strong id="asset-count" class="text-light">—</strong></div>
-                </div>
-                <div class="row mt-3 g-2 align-items-end">
-                    <div class="col-auto">
-                        <label class="form-label small text-secondary mb-1">Timeframe</label>
-                        <select id="sel-timeframe" class="form-select form-select-sm">
-                            <option value="60">1 min</option>
-                            <option value="300">5 min</option>
-                            <option value="900">15 min</option>
-                            <option value="3600">1 hour</option>
-                        </select>
-                    </div>
-                    <div class="col-auto">
-                        <label class="form-label small text-secondary mb-1">Strategy (auto)</label>
-                        <div id="lbl-strategy" class="form-control form-control-sm bg-dark text-info" style="min-width: 260px;">—</div>
-                    </div>
-                    <div class="col-auto">
-                        <button id="btn-apply-settings" class="btn btn-primary btn-sm">Apply</button>
-                    </div>
-                    <div class="col-auto">
-                        <span id="settings-status" class="small text-secondary"></span>
-                    </div>
-                </div>
-                <div class="mt-2 small text-secondary">
-                    Active assets: <span id="assets" class="text-light">—</span>
-                </div>
-            </div>
-        </div>
+<div class="row g-3 mb-2">
+  <div class="col-lg-8"><div class="card"><div class="card-body">
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <span id="bot-status-pill" class="pill off"><span class="dot"></span>Loading…</span>
+      <button id="btn-start" class="btn btn-success btn-sm">▶ Start</button>
+      <button id="btn-stop" class="btn btn-warning btn-sm">⏸ Pause</button>
+      <button id="btn-refresh" class="btn btn-outline-secondary btn-sm">⟳</button>
+      <span class="ms-auto text-secondary small" id="last-updated">—</span>
     </div>
-    <div class="col-md-4">
-        <div class="card border-secondary">
-            <div class="card-body">
-                <h5 class="card-title mb-3">Risk State</h5>
-                <div class="row text-center g-2">
-                    <div class="col-6"><div class="text-secondary small">Balance</div><div class="h5 mb-0" id="r-balance">—</div></div>
-                    <div class="col-6"><div class="text-secondary small">Day P/L</div><div class="h5 mb-0" id="r-day-pnl">—</div></div>
-                    <div class="col-6"><div class="text-secondary small">Consec Losses</div><div class="h5 mb-0" id="r-consec">—</div></div>
-                    <div class="col-6"><div class="text-secondary small">Cooldown</div><div class="h6 mb-0" id="r-cooldown">—</div></div>
-                </div>
-                <div id="readonly-banner" class="alert alert-danger mt-3 mb-0 d-none py-2 small">⚠️ Read-only (drawdown guard)</div>
-            </div>
-        </div>
+    <div class="meta mt-3">
+      <span class="chip">Mode <b id="mode">—</b></span><span class="chip">Account <b id="account">—</b></span>
+      <span class="chip">Assets <b id="asset-count">—</b></span><span class="chip">Feed <b id="feed">—</b></span>
     </div>
+    <div class="row g-2 mt-2 align-items-end">
+      <div class="col-auto"><label class="form-label small text-secondary mb-1">Timeframe</label>
+        <select id="sel-timeframe" class="form-select form-select-sm">
+          <option value="60">1 min</option><option value="300">5 min</option>
+          <option value="900">15 min</option><option value="3600">1 hour</option></select></div>
+      <div class="col-auto"><label class="form-label small text-secondary mb-1">Strategy (auto)</label>
+        <div id="lbl-strategy" class="form-control form-control-sm bg-dark text-info" style="min-width:230px">—</div></div>
+      <div class="col-auto"><button id="btn-apply-settings" class="btn btn-primary btn-sm">Apply</button></div>
+      <div class="col-auto"><span id="settings-status" class="small text-secondary"></span></div>
+    </div>
+    <div class="form-check form-switch mt-3">
+      <input class="form-check-input" type="checkbox" id="sw-mtg">
+      <label class="form-check-label" for="sw-mtg">MTG1 — retry on the next candle after a loss</label>
+    </div>
+    <div class="small text-secondary mt-2" style="word-break:break-word">Assets: <span id="assets" class="text-light">—</span></div>
+  </div></div></div>
+  <div class="col-lg-4"><div class="card h-100"><div class="card-body">
+    <h6 class="card-title mb-3">Risk</h6>
+    <div class="row text-center g-2">
+      <div class="col-6"><div class="text-secondary small">Balance</div><div class="h5 mb-0" id="r-balance">—</div></div>
+      <div class="col-6"><div class="text-secondary small">Day P/L</div><div class="h5 mb-0" id="r-day-pnl">—</div></div>
+      <div class="col-6"><div class="text-secondary small">Loss streak</div><div class="h5 mb-0" id="r-consec">—</div></div>
+      <div class="col-6"><div class="text-secondary small">Cooldown</div><div class="h6 mb-0" id="r-cooldown">—</div></div>
+    </div>
+    <div id="readonly-banner" class="alert alert-danger mt-3 mb-0 d-none py-2 small">⚠️ Read-only (drawdown guard)</div>
+  </div></div></div>
 </div>
 
-<div class="row g-3 mb-3">
-    <div class="col-md-4"><div class="card border-secondary"><div class="card-body">
-        <h6 class="text-secondary mb-2">All Signals</h6>
-        <div class="h4 mb-1" id="s-all-winrate">—</div>
-        <div class="small text-secondary">Win rate · PF <span id="s-all-pf">—</span></div>
-        <div class="small mt-1">P/L: <strong id="s-all-pnl">—</strong></div>
-    </div></div></div>
-    <div class="col-md-4"><div class="card border-secondary"><div class="card-body">
-        <h6 class="text-secondary mb-2">Base (Step 0)</h6>
-        <div class="h4 mb-1" id="s-base-winrate">—</div>
-        <div class="small text-secondary">Win rate · PF <span id="s-base-pf">—</span></div>
-        <div class="small mt-1">P/L: <strong id="s-base-pnl">—</strong></div>
-    </div></div></div>
-    <div class="col-md-4"><div class="card border-secondary"><div class="card-body">
-        <h6 class="text-secondary mb-2">MTG (Step 1+)</h6>
-        <div class="h4 mb-1" id="s-mtg-winrate">—</div>
-        <div class="small text-secondary">Win rate · PF <span id="s-mtg-pf">—</span></div>
-        <div class="small mt-1">P/L: <strong id="s-mtg-pnl">—</strong></div>
-    </div></div></div>
+<div class="sec">Performance</div>
+<div class="row g-3 mb-2">
+  <div class="col-md-4"><div class="card stat"><div class="card-body"><div class="text-secondary small">All signals</div>
+    <div class="kpi" id="s-all-winrate">—</div><div class="small text-secondary">PF <span id="s-all-pf">—</span> · P/L <b id="s-all-pnl">—</b></div></div></div></div>
+  <div class="col-md-4"><div class="card stat win"><div class="card-body"><div class="text-secondary small">Base (step 0)</div>
+    <div class="kpi" id="s-base-winrate">—</div><div class="small text-secondary">PF <span id="s-base-pf">—</span> · P/L <b id="s-base-pnl">—</b></div></div></div></div>
+  <div class="col-md-4"><div class="card stat mtg"><div class="card-body"><div class="text-secondary small">MTG1 trades</div>
+    <div class="kpi" id="s-mtg-winrate">—</div><div class="small text-secondary">PF <span id="s-mtg-pf">—</span> · P/L <b id="s-mtg-pnl">—</b></div></div></div></div>
 </div>
 
-<div class="card border-secondary mb-4">
-    <div class="card-body">
-        <h5 class="card-title mb-3">Recent Signals (latest 20)</h5>
-        <div class="table-responsive">
-            <table class="table table-sm table-dark table-striped align-middle">
-                <thead><tr>
-                    <th>Time (UTC)</th><th>Asset</th><th>Side</th><th>Step</th>
-                    <th>Entry</th><th>Stake</th><th>Payout</th><th>Score</th><th>Status</th><th>P/L</th>
-                </tr></thead>
-                <tbody id="signals-body">
-                    <tr><td colspan="10" class="text-center text-secondary">Loading…</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
+<div class="sec">History · every 10 signals</div>
+<div class="card mb-2"><div class="card-body">
+  <div class="small text-secondary mb-2" id="h-total">—</div>
+  <div class="table-responsive"><table class="table table-sm table-dark align-middle mb-0">
+    <thead><tr><th>Block</th><th>Signals</th><th>Win</th><th>MTG1 win</th><th>Loss</th><th>Win rate</th><th>P/L</th></tr></thead>
+    <tbody id="history-body"><tr><td colspan="7" class="text-center text-secondary">No finished signals yet</td></tr></tbody>
+  </table></div>
+</div></div>
 
+<div class="sec">Recent signals</div>
+<div class="card mb-4"><div class="card-body"><div class="table-responsive">
+  <table class="table table-sm table-dark table-striped align-middle mb-0">
+    <thead><tr><th>Time (UTC)</th><th>Asset</th><th>Side</th><th>Step</th><th>Entry</th><th>Stake</th><th>Payout</th><th>Score</th><th>Status</th><th>P/L</th></tr></thead>
+    <tbody id="signals-body"><tr><td colspan="10" class="text-center text-secondary">Loading…</td></tr></tbody>
+  </table></div></div></div>
 {% endblock %}
-{% block scripts %}
-<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
-{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>{% endblock %}
