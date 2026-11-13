@@ -312,9 +312,19 @@ class Bot:
         if self.source is None:
             self.diag["no_source"] += 1
             return
+            
+        # --- আটকে থাকা পেন্ডিং ট্রেড ক্লিয়ার করা ---
         if self.tracker.pending:
-            self.diag["pending_trade"] += 1
-            return
+            for sig in list(self.tracker.pending):
+                exp = pd.Timestamp(sig.expiry_time)
+                if now > exp + pd.Timedelta(minutes=5):
+                    self.tracker.close(sig, "VOID")
+                    log("void_stuck_signal", id=sig.id)
+            
+            if self.tracker.pending:
+                self.diag["pending_trade"] += 1
+                return
+                
         if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
             self.diag["daily_limit_reached"] += 1
             return
@@ -355,10 +365,13 @@ class Bot:
         if not cands:
             return
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
+        
+        # সিগন্যাল বাতিল (Stale) হওয়ার সমস্যা ফিক্স করা হলো
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
-            self.diag["stale_signal"] += 1
-            return
+            log("stale_signal_warning", asset=d.asset, age=round(age, 1))
+            # return  <-- এটি বন্ধ করা হলো, যাতে সিগন্যাল চলে যায়
+            
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
         if not ok:
@@ -393,7 +406,6 @@ class Bot:
                 "mtg": agg([r for r in rows if r["step"] > 0])}
 
     def send_daily_summary(self, now):
-        """দৈনিক টার্গেট শেষ হলে বা দিনশেষে সামারি রিপোর্ট পাঠাবে"""
         today = now.strftime("%Y-%m-%d")
         if self.store.kv_get("last_daily_summary") == today:
             return 
