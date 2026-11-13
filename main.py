@@ -58,11 +58,21 @@ class Bot:
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
         
-        # মেমরি-ভিত্তিক লিমিট এবং গ্যাপ
-        self.signals_sent_today = self.store.kv_get("signals_sent_today", 0)
-        self.last_reset_day = self.store.kv_get("last_reset_day", utcnow().strftime("%Y-%m-%d"))
-        self.last_signal_time = 0
-        self.last_result_time = 0
+        # ডাটাবেস থেকে কাউন্টার এবং টাইমার লোড করা (রিস্টার্টেও থাকবে)
+        today = utcnow().strftime("%Y-%m-%d")
+        saved_day = self.store.kv_get("last_reset_day", today)
+        if saved_day != today:
+            self.signals_sent_today = 0
+            self.store.kv_set("signals_sent_today", 0)
+            self.store.kv_set("last_reset_day", today)
+            self.last_signal_time = 0
+            self.last_result_time = 0
+        else:
+            self.signals_sent_today = int(self.store.kv_get("signals_sent_today", 0))
+            self.last_signal_time = float(self.store.kv_get("last_signal_time", 0))
+            self.last_result_time = float(self.store.kv_get("last_result_time", 0))
+        
+        self.last_reset_day = today
         
         # আটকে থাকা সিগন্যাল ক্লিয়ার
         if self.tracker.pending:
@@ -257,6 +267,8 @@ class Bot:
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 
                 self.last_result_time = time.time()
+                self.store.kv_set("last_result_time", self.last_result_time)
+                
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
                 self._send_result(sig, m5, outcome, pnl)
                 
@@ -268,17 +280,11 @@ class Bot:
                 if not created:
                     fx.maybe_history_report(self)
                     
-                if self.signals_sent_today >= self.cfg.max_signals_per_day:
-                    if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
-                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
-                        self.send_daily_summary(now)
             except Exception as e:
                 log("resolve_error", id=sig.id, error=str(e)[:200])
             finally:
-                # জোরপূর্বক সিগন্যাল ক্লিয়ার করা, যাতে বট আটকে না থাকে
                 if sig in self.tracker.pending:
                     self.tracker.close(sig, "VOID")
-                    self.last_result_time = time.time()
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
@@ -349,6 +355,7 @@ class Bot:
         self.signals_sent_today += 1
         self.store.kv_set("signals_sent_today", self.signals_sent_today)
         self.last_signal_time = time.time()
+        self.store.kv_set("last_signal_time", self.last_signal_time)
         
         log("SIGNAL_SENT", id=sig.id, asset=d.asset, direction=d.decision, score=d.score)
         self._send_signal(sig, m5)
