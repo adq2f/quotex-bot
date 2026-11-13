@@ -39,7 +39,7 @@ class Bot:
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
-        log("BOT_STARTUP", VERSION="FINAL-PHOTO-TEXT-V6")
+        log("BOT_STARTUP", VERSION="V7-STRICT-LIMIT")
         
         if self.source is None:
             try:
@@ -139,7 +139,6 @@ class Bot:
             path = ""
             
         line = "🟢⬆️ UP (BUY)" if sig.direction == "BUY" else "🔴⬇️ DOWN (SELL)"
-        
         score = getattr(sig, "score", 0)
         if score >= 85:
             signal_type = "🔥🔥 HIGH ACCURACY SIGNAL ✅ 🔥🔥"
@@ -148,7 +147,7 @@ class Bot:
             
         feed = self.feed_label()
         
-        # Photo এবং Text একসাথে (Caption) যাবে
+        # এক মেসেজে ছবি এবং টেক্সট (Caption)
         cap = (f"📢 <b>SIGNAL</b>\n"
                f"{signal_type}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
@@ -179,7 +178,6 @@ class Bot:
         header = {"WIN": "✅ WIN", "LOSS": "❌ LOSS"}.get(outcome, "➖ DRAW")
         pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
         
-        # Photo এবং Result একসাথে (Caption) যাবে
         cap = (f"<b>{header}</b>\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"Pair: <b>{sig.asset}</b>\n"
@@ -197,10 +195,15 @@ class Bot:
         self._pre_scan_candidate = None
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
             return
+            
+        # --- কড়া লিমিট চেক ---
+        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+            return
+            
         if self.tracker.pending:
             return
         
-        # ৩ মিনিটের গ্যাপ চেক (ডাটাবেস থেকে)
+        # ৩ মিনিটের গ্যাপ চেক
         last_sig = self.store.kv_get("last_signal_time", 0)
         last_res = self.store.kv_get("last_result_time", 0)
         if (time.time() - last_sig) < 180 or (time.time() - last_res) < 180:
@@ -241,7 +244,6 @@ class Bot:
         except Exception as e:
             path = ""
             
-        # Watch Market এর সাথে ছবি এবং টেক্সট একসাথে যাবে
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
         
         if path and os.path.exists(path):
@@ -254,16 +256,12 @@ class Bot:
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
-                # রেজাল্ট ১০০% নিশ্চিত করতে ব্যাকআপ লজিক
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
-                
                 if len(m5) > 0:
                     exit_price = float(m5["close"].iloc[-1])
                 else:
-                    # যদি ক্যান্ডেল না পায়, বর্তমান প্রাইস নিয়ে রেজাল্ট দেবে
                     exit_price = sig.entry_price
-                    log("resolve_fallback_price", id=sig.id)
-                
+                    
                 outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
                 pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
                 self.risk.record_result(sig.asset, outcome, pnl, now)
@@ -285,7 +283,7 @@ class Bot:
                     
                 if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
                     if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
-                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
+                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow.")
                         self.send_daily_summary(now)
             except Exception as e:
                 log("resolve_error", id=sig.id, error=str(e)[:200])
@@ -317,6 +315,10 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
+        # কড়া লিমিট চেক
+        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day: 
+            return
+            
         # ডাটাবেস থেকে ৩ মিনিটের গ্যাপ চেক
         last_sig = self.store.kv_get("last_signal_time", 0)
         last_res = self.store.kv_get("last_result_time", 0)
@@ -331,8 +333,6 @@ class Bot:
                     self.tracker.close(sig, "VOID")
             if self.tracker.pending: return
                 
-        if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day: return
-            
         cands = []
         bad = fx.bad_assets(self)
         for asset in cfg.whitelist:
@@ -448,20 +448,21 @@ class Bot:
                 
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
-                        self._pre_scan(utcnow())
-                        
-                        at_5s = next_boundary - 5
-                        while time.time() < at_5s and not self.stop_event.is_set():
-                            if self.cfg.entry_tf_seconds != tf: break
-                            time.sleep(min(0.5, max(0.0, at_5s - time.time())))
-                        
-                        if not self.stop_event.is_set() and self.cfg.entry_tf_seconds == tf and time.time() >= at_5s:
-                            if getattr(self, "_pre_scan_candidate", None):
-                                asset, direction = self._pre_scan_candidate
-                                line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
-                                # ENTRY IN 5s: শুধু টেক্সট যাবে (ছবি ছাড়া)
-                                self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
-                                self._pre_scan_candidate = None
+                        # লিমিট চেক (মেইন লুপে)
+                        if self.risk.s["signals_today"] < self.cfg.max_signals_per_day:
+                            self._pre_scan(utcnow())
+                            
+                            at_5s = next_boundary - 5
+                            while time.time() < at_5s and not self.stop_event.is_set():
+                                if self.cfg.entry_tf_seconds != tf: break
+                                time.sleep(min(0.5, max(0.0, at_5s - time.time())))
+                            
+                            if not self.stop_event.is_set() and self.cfg.entry_tf_seconds == tf and time.time() >= at_5s:
+                                if getattr(self, "_pre_scan_candidate", None):
+                                    asset, direction = self._pre_scan_candidate
+                                    line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
+                                    self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
+                                    self._pre_scan_candidate = None
                     except Exception as e:
                         log("pre_scan_cycle_error", error=str(e)[:300])
 
