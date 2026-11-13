@@ -200,18 +200,35 @@ class Bot:
                 if d.decision == "HOLD" or d.score < cfg.prepare_min_score: continue
                 entry_time = d.candle_close or now
                 if entry_time <= now: continue
-                candidates.append((d, entry_time))
+                candidates.append((d, entry_time, m5)) # m5 যুক্ত করা হলো ছবি আঁকার জন্য
             except Exception as e:
                 log("pre_scan_error", asset=asset, error=str(e)[:200])
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         
         if not candidates: return
         top = candidates[0]
-        d, entry_time = top
+        d, entry_time, m5_peek = top
         self._pre_scan_candidate = (d.asset, d.decision)
         
-        # মেসেজ ১: ১৫ সেকেন্ড আগে Watch Market
-        self.tg.message(f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 8s direction.</i>")
+        # ---- Watch Market এর জন্য ছবি তৈরি ----
+        path = os.path.join(self.cfg.charts_dir, f"watch_{d.asset}.png")
+        info = {"asset": d.asset, "direction": d.decision, "score": d.score, "step": 0,
+                "tf_seconds": cfg.entry_tf_seconds, "entry_price": d.entry_price,
+                "expiry_text": f"expiry {self._expiry_text()}", "viz": self._viz(d, m5_peek)}
+        try:
+            render_signal_chart(m5_peek, info, path, self._tz())
+        except Exception as e:
+            log("pre_scan_chart_failed", error=str(e)[:200])
+            path = ""
+            
+        cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
+        
+        # ছবি সহ মেসেজ পাঠানো
+        if path and os.path.exists(path):
+            self.tg.photo(path, cap)
+        else:
+            self.tg.message(cap)
+            
         log("prepare_watch_sent", asset=d.asset, direction=d.decision)
 
     def resolve_due(self, now):
@@ -226,7 +243,6 @@ class Bot:
                 
             exp = pd.Timestamp(sig.expiry_time) - pd.Timedelta(seconds=cfg.entry_tf_seconds)
             
-            # --- FIX: ক্যান্ডেল ম্যাচ না করলেও রেজাল্ট বের করা ---
             valid_candles = m5[m5.index <= exp]
             if len(valid_candles) == 0:
                 sig.tries += 1
@@ -416,7 +432,7 @@ class Bot:
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
                         self._pre_scan(utcnow())
-                        # মেসেজ ২: ৫ সেকেন্ড আগে দিক (UP/DOWN) জানানো
+                        
                         at_5s = next_boundary - 5
                         while time.time() < at_5s and not self.stop_event.is_set():
                             if self.cfg.entry_tf_seconds != tf: break
@@ -426,6 +442,7 @@ class Bot:
                             if getattr(self, "_pre_scan_candidate", None):
                                 asset, direction = self._pre_scan_candidate
                                 line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
+                                # ৫ সেকেন্ডের মেসেজে শুধু টেক্সট যাবে, ছবি যাবে না
                                 self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
                                 self._pre_scan_candidate = None
                     except Exception as e:
