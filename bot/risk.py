@@ -1,6 +1,5 @@
 """
 risk.py  --  Rulebook Section 6 + Section 16 (stateful risk manager).
-Optimized for High Frequency Scalping (No Asset Lock, Short Cooldown).
 """
 import re
 from datetime import datetime, timedelta, timezone
@@ -26,8 +25,7 @@ class RiskManager:
         self._save()
 
     def _save(self):
-        if self.store: 
-            self.store.kv_set("risk_state", self.s)
+        if self.store: self.store.kv_set("risk_state", self.s)
 
     @property
     def balance(self) -> float:
@@ -48,8 +46,7 @@ class RiskManager:
         cu = self.s.get("cooldown_until")
         if cu:
             cu = datetime.fromisoformat(cu)
-            if now < cu: 
-                return cu
+            if now < cu: return cu
         return None
 
     def can_open(self, asset: str, direction: str, now: datetime, payout_pct: float,
@@ -57,32 +54,21 @@ class RiskManager:
         c = self.cfg
         self._roll_day(now)
         
-        if self.s["read_only"]: 
-            return False, "READ-ONLY (drawdown guard)"
-        if self.s["day_pnl"] <= -c.daily_loss_pct / 100.0 * self.s["day_start"]: 
-            return False, "Daily-limit reached"
-        if c.stop_on_daily_profit and self.s["day_pnl"] >= c.daily_profit_pct / 100.0 * self.s["day_start"]: 
-            return False, "Daily profit target reached"
+        if self.s["read_only"]: return False, "READ-ONLY (drawdown guard)"
+        if self.s["day_pnl"] <= -c.daily_loss_pct / 100.0 * self.s["day_start"]: return False, "Daily-limit reached"
+        if c.stop_on_daily_profit and self.s["day_pnl"] >= c.daily_profit_pct / 100.0 * self.s["day_start"]: return False, "Daily profit target reached"
             
         cu = self.cooldown_active(now)
-        if cu: 
-            return False, f"Cooldown until {cu.strftime('%H:%M')} UTC"
-        if pending >= c.max_concurrent_trades: 
-            return False, "Trade already open"
-        if payout_pct < c.min_payout_pct: 
-            return False, f"Payout {payout_pct:.0f}% too low"
+        if cu: return False, f"Cooldown until {cu.strftime('%H:%M')} UTC"
+        if pending >= c.max_concurrent_trades: return False, "Trade already open"
+        if payout_pct < c.min_payout_pct: return False, f"Payout {payout_pct:.0f}% too low"
         
         if not is_mtg:
-            if self.s["signals_today"] >= c.max_signals_per_day: 
-                return False, "Max signals/day reached"
-            
-            # Asset Lock বন্ধ করা হলো (লস হলেও আবার ট্রেড নিতে পারবে)
-            # if self.s["asset_losses"].get(asset, 0) >= c.asset_loss_lock: 
-            #     return False, f"{asset} locked today"
+            if self.s["signals_today"] >= c.max_signals_per_day: return False, "Max signals/day reached"
             
             sym = base_symbol(asset)
-            # ডাইনামিক কুলডাউন: ১ মিনিটে ১ মিনিট, ৫ মিনিটে ৩ মিনিট
-            cooldown_mins = 1 if c.entry_tf_seconds == 60 else 3
+            # কুলডাউন: ১ মিনিটে ৩ মিনিট, ৫ মিনিটে ৫ মিনিট
+            cooldown_mins = 3 if c.entry_tf_seconds == 60 else 5
             
             for ts, a2, d2 in self.s["recent"]:
                 t = datetime.fromisoformat(ts)
@@ -96,22 +82,19 @@ class RiskManager:
         c = self.cfg
         risk = c.mtg_base_risk_pct if c.mtg_enabled else c.max_risk_pct
         stake = self.balance * risk / 100.0
-        if is_otc(asset): 
-            stake *= c.otc_size_multiplier
+        if is_otc(asset): stake *= c.otc_size_multiplier
         stake = min(stake, self.balance * 0.02)
         return round(max(stake, c.stake_min), 2)
 
     def mtg_stake(self, base_stake: float, payout_pct: float) -> Optional[float]:
         p = payout_pct / 100.0
         m = round(base_stake * (1 + p) / p, 2)
-        if base_stake + m > self.balance * 0.02 + 1e-9: 
-            return None
+        if base_stake + m > self.balance * 0.02 + 1e-9: return None
         return m
 
     def register_signal(self, asset: str, direction: str, now: datetime, is_mtg: bool = False):
         self._roll_day(now)
-        if not is_mtg: 
-            self.s["signals_today"] += 1
+        if not is_mtg: self.s["signals_today"] += 1
         rec = [r for r in self.s["recent"] if (now - datetime.fromisoformat(r[0])) <= timedelta(minutes=15)]
         rec.append([now.isoformat(), base_symbol(asset), direction])
         self.s["recent"] = rec
@@ -127,16 +110,14 @@ class RiskManager:
         if outcome == "LOSS":
             self.s["consec"] += 1
             self.s["asset_losses"][asset] = self.s["asset_losses"].get(asset, 0) + 1
-            # কুলডাউন মাত্র ১ মিনিট করা হলো
             if self.s["consec"] >= c.max_consec_losses:
-                self.s["cooldown_until"] = (now + timedelta(minutes=1)).isoformat()
+                self.s["cooldown_until"] = (now + timedelta(minutes=2)).isoformat()
                 self.s["consec"] = 0
         elif outcome == "WIN":
             self.s["consec"] = 0
             
         dd = (self.s["peak"] - self.s["balance"]) / self.s["peak"] * 100.0 if self.s["peak"] else 0.0
-        if dd > c.drawdown_guard_pct: 
-            self.s["read_only"] = True
+        if dd > c.drawdown_guard_pct: self.s["read_only"] = True
         self._save()
 
     def reset_read_only(self):
