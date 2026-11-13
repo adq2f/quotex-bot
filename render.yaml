@@ -2,7 +2,7 @@ services:
   - type: web
     name: quotex-signal-bot
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     healthCheckPath: /health
@@ -14,22 +14,20 @@ services:
       - key: EXECUTION_MODE
         value: signal_only
       - key: DATA_SOURCE
-        value: quotex
-      - key: DB_PATH
-        value: /data/quotex_bot.db
-      - key: MTG_ENABLED
-        value: "false"
+        value: biquote
+      - key: MTG_ALERT_SECONDS
+        value: "10"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: QUOTEX_EMAIL
+      - key: TURSO_DATABASE_URL
         sync: false
-      - key: QUOTEX_PASSWORD
+      - key: TURSO_AUTH_TOKEN
         sync: false
-      - key: ADMIN_KEY
+      - key: WEB_ADMIN_USERNAME
+        sync: false
+      - key: WEB_ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
         generateValue: true
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
