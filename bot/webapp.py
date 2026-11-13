@@ -1,4 +1,13 @@
-"""webapp.py  --  Flask: auth + dashboard + bot control + settings + history + diagnostics."""
+"""
+webapp.py  --  Flask: auth + dashboard + bot control + settings + history + diagnostics.
+
+v2.2 fix log:
+  * /api/settings POST now updates bot.cfg for TF and MTG (previously only max_signals),
+    and uses overrides so a failing DB can't revert the change.
+  * Every /api/* endpoint that touches the store is wrapped so a Turso outage
+    cannot 500 the dashboard.
+  * /api/bot/status exposes the in-memory signals_sent_today directly.
+"""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -25,6 +34,15 @@ def _auth_required(f):
     return wrapper
 
 
+def _safe(fn, fallback):
+    """Run fn(); return fallback on any exception (typically a DB outage)."""
+    try:
+        return fn()
+    except Exception as e:
+        log("api_safe_swallow", error=str(e)[:200])
+        return fallback
+
+
 def create_app(bot, controller: BotController) -> Flask:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     app = Flask(__name__, template_folder=os.path.join(root, "templates"),
@@ -34,14 +52,18 @@ def create_app(bot, controller: BotController) -> Flask:
                       SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true",
                       PERMANENT_SESSION_LIFETIME=timedelta(days=7))
     store = bot.store
-    if store.user_count() == 0:
-        username = os.getenv("WEB_ADMIN_USERNAME", "admin")
-        password = os.getenv("WEB_ADMIN_PASSWORD", "")
-        if not password:
-            password = secrets.token_urlsafe(12)
-            log("admin_seeded_random", username=username, password=password)
-        store.create_user(username, generate_password_hash(password))
-        log("admin_created", username=username)
+
+    try:
+        if store.user_count() == 0:
+            username = os.getenv("WEB_ADMIN_USERNAME", "admin")
+            password = os.getenv("WEB_ADMIN_PASSWORD", "")
+            if not password:
+                password = secrets.token_urlsafe(12)
+                log("admin_seeded_random", username=username, password=password)
+            store.create_user(username, generate_password_hash(password))
+            log("admin_created", username=username)
+    except Exception as e:
+        log("admin_seed_error", error=str(e)[:300])
 
     @app.get("/health")
     def health():
@@ -51,14 +73,14 @@ def create_app(bot, controller: BotController) -> Flask:
     def login():
         if request.method == "POST":
             username = request.form.get("username", "").strip()
-            user = store.get_user(username)
+            user = _safe(lambda: store.get_user(username), None)
             if user and check_password_hash(user["password_hash"], request.form.get("password", "")):
                 session.clear()
                 session.update(user=username, sid=secrets.token_hex(8))
                 session.permanent = True
-                store.update_last_login(username)
+                _safe(lambda: store.update_last_login(username), None)
                 controller.on_login(session["sid"], username)
-                controller.touch_keepalive()
+                _safe(controller.touch_keepalive, None)
                 nxt = request.args.get("next") or url_for("dashboard")
                 return redirect(nxt if nxt.startswith("/") else url_for("dashboard"))
             flash("Invalid username or password", "danger")
@@ -79,33 +101,39 @@ def create_app(bot, controller: BotController) -> Flask:
     @app.get("/dashboard")
     @_auth_required
     def dashboard():
-        controller.touch_keepalive()
+        _safe(controller.touch_keepalive, None)
         return render_template("dashboard.html", username=session["user"])
 
     @app.get("/api/bot/status")
     @_auth_required
     def api_bot_status():
-        controller.touch_keepalive()
+        _safe(controller.touch_keepalive, None)
+        risk = _safe(lambda: bot.risk.snapshot(datetime.now(timezone.utc)),
+                     {"balance": 0, "day_pnl": 0, "consec_losses": 0,
+                      "cooldown_until": None, "read_only": False,
+                      "signals_today": 0, "asset_losses": {}})
+        summary = _safe(bot.summary_numbers, {"all": {}, "base": {}, "mtg": {}})
+        recent = _safe(lambda: store.list_signals(limit=20), [])
         return jsonify({
-            "controller": controller.status(), 
-            "risk": bot.risk.snapshot(datetime.now(timezone.utc)),
-            "mode": bot.cfg.execution_mode, 
+            "controller": controller.status(),
+            "risk": risk,
+            "mode": bot.cfg.execution_mode,
             "account": bot.cfg.account_type,
-            "mtg_enabled": bot.cfg.mtg_enabled, 
+            "mtg_enabled": bot.cfg.mtg_enabled,
             "whitelist": list(bot.cfg.whitelist),
-            "summary": bot.summary_numbers(), 
-            "recent": store.list_signals(limit=20),
-            "strategy_mode": bot.cfg.strategy_mode, 
+            "summary": summary,
+            "recent": recent,
+            "strategy_mode": bot.cfg.strategy_mode,
             "timeframe_seconds": bot.cfg.entry_tf_seconds,
             "feed": bot.feed_label(),
-            "signals_today": bot.signals_sent_today,  # মেমরি থেকে লাইভ কাউন্টার আসছে
-            "max_signals": bot.cfg.max_signals_per_day
+            "signals_today": bot.signals_sent_today,     # in-memory counter
+            "max_signals": bot.cfg.max_signals_per_day,
         })
 
     @app.post("/api/bot/start")
     @_auth_required
     def api_bot_start():
-        controller.touch_keepalive()
+        _safe(controller.touch_keepalive, None)
         controller.resume(reason=f"manual:{session.get('user')}")
         return jsonify({"ok": True, "status": controller.status()})
 
@@ -118,40 +146,55 @@ def create_app(bot, controller: BotController) -> Flask:
     @app.get("/api/settings")
     @_auth_required
     def api_get_settings():
-        tf = int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds) or 300)
-        max_sig = int(store.get_setting("max_signals_per_day", bot.cfg.max_signals_per_day))
+        tf = _safe(lambda: int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds) or 300),
+                   bot.cfg.web_timeframe_seconds)
+        max_sig = _safe(lambda: int(store.get_setting("max_signals_per_day", bot.cfg.max_signals_per_day)),
+                        bot.cfg.max_signals_per_day)
+        mtg = _safe(lambda: bool(store.get_setting("mtg_enabled", bot.cfg.mtg_enabled)),
+                    bot.cfg.mtg_enabled)
         return jsonify({"web_timeframe_seconds": tf, "strategy_mode": strategy_for_timeframe(tf),
-                        "mtg_enabled": bool(store.get_setting("mtg_enabled", bot.cfg.mtg_enabled)),
-                        "max_signals_per_day": max_sig})
+                        "mtg_enabled": mtg, "max_signals_per_day": max_sig})
 
     @app.post("/api/settings")
     @_auth_required
     def api_set_settings():
         data = request.get_json() or {}
+        overrides = {}
+
         if "web_timeframe_seconds" in data:
             tf = int(data["web_timeframe_seconds"] or 0)
             if tf not in (60, 300, 900, 3600):
                 return jsonify({"error": "invalid web_timeframe_seconds"}), 400
-            store.set_setting("web_timeframe_seconds", tf)
+            _safe(lambda: store.set_setting("web_timeframe_seconds", tf), None)
+            overrides["web_timeframe_seconds"] = tf
+
         if "mtg_enabled" in data:
-            store.set_setting("mtg_enabled", bool(data["mtg_enabled"]))
+            mtg = bool(data["mtg_enabled"])
+            _safe(lambda: store.set_setting("mtg_enabled", mtg), None)
+            overrides["mtg_enabled"] = mtg
+
         if "max_signals_per_day" in data:
-            ms = int(data["max_signals_per_day"])
+            try:
+                ms = int(data["max_signals_per_day"])
+            except Exception:
+                return jsonify({"error": "invalid max_signals_per_day"}), 400
             if ms < 1 or ms > 100:
                 return jsonify({"error": "invalid max_signals_per_day"}), 400
-            store.set_setting("max_signals_per_day", ms)
-            # সরাসরি বটের কনফিগে আপডেট করে দেওয়া হলো যাতে সাথে সাথে কাজ করে
-            bot.cfg = dataclasses.replace(bot.cfg, max_signals_per_day=ms)
-            
-        bot._build_strategy()
+            _safe(lambda: store.set_setting("max_signals_per_day", ms), None)
+            overrides["max_signals_per_day"] = ms
+
+        bot._build_strategy(overrides=overrides)
         return jsonify({"ok": True, "applied": {
-            "web_timeframe_seconds": bot.cfg.entry_tf_seconds, "strategy_mode": bot.cfg.strategy_mode,
-            "mtg_enabled": bot.cfg.mtg_enabled, "max_signals_per_day": bot.cfg.max_signals_per_day}})
+            "web_timeframe_seconds": bot.cfg.entry_tf_seconds,
+            "strategy_mode": bot.cfg.strategy_mode,
+            "mtg_enabled": bot.cfg.mtg_enabled,
+            "max_signals_per_day": bot.cfg.max_signals_per_day,
+        }})
 
     @app.get("/api/history")
     @_auth_required
     def api_history():
-        return jsonify(fx.history_blocks(store))
+        return jsonify(_safe(lambda: fx.history_blocks(store), {"total": {}, "blocks": []}))
 
     @app.get("/api/test/scan")
     @_auth_required
@@ -194,10 +237,16 @@ def create_app(bot, controller: BotController) -> Flask:
     @app.get("/stats")
     @_auth_required
     def stats():
-        controller.touch_keepalive()
-        return jsonify({"risk": bot.risk.snapshot(datetime.now(timezone.utc)),
-                        "pending": [s.to_dict() for s in bot.tracker.pending], "summary": bot.summary_numbers(),
-                        "strategy_mode": bot.cfg.strategy_mode, "entry_tf_seconds": bot.cfg.entry_tf_seconds})
+        _safe(controller.touch_keepalive, None)
+        return jsonify({
+            "risk": _safe(lambda: bot.risk.snapshot(datetime.now(timezone.utc)), {}),
+            "pending": [s.to_dict() for s in bot.tracker.pending],
+            "summary": _safe(bot.summary_numbers, {}),
+            "signals_today": bot.signals_sent_today,
+            "max_signals": bot.cfg.max_signals_per_day,
+            "strategy_mode": bot.cfg.strategy_mode,
+            "entry_tf_seconds": bot.cfg.entry_tf_seconds,
+        })
 
     @app.get("/diag")
     @_auth_required
