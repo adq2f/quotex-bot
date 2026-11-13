@@ -11,41 +11,24 @@ try:
 except ImportError:
     pass
 
-
 def _f(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, default))
-    except ValueError:
-        return float(default)
-
+    try: return float(os.getenv(name, default))
+    except ValueError: return float(default)
 
 def _i(name: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(name, default)))
-    except ValueError:
-        return int(default)
-
+    try: return int(float(os.getenv(name, default)))
+    except ValueError: return int(default)
 
 def _b(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
 
 def _list(name: str, default: str = "") -> List[str]:
     raw = os.getenv(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
 
-
 DEFAULT_WHITELIST = (
-    "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDUSD_otc,USDCAD_otc,USDCHF_otc,NZDUSD_otc,"
-    "EURGBP_otc,EURJPY_otc,GBPJPY_otc,EURCHF_otc,AUDJPY_otc,CADJPY_otc,"
-    "CHFJPY_otc,GBPCHF_otc,GBPAUD_otc,GBPCAD_otc,EURNZD_otc,AUDCAD_otc,"
-    "AUDCHF_otc,AUDNZD_otc,NZDCAD_otc,NZDCHF_otc,NZDJPY_otc,EURAUD_otc,EURCAD_otc,"
-    "USDINR_otc,USDBDT_otc,USDTHB_otc,USDSGD_otc,USDZAR_otc,"
-    "BTCUSD_otc,ETHUSD_otc,LTCUSD_otc,XRPUSD_otc,BCHUSD_otc,"
-    "XAUUSD_otc,XAGUSD_otc,"
-    "US500_otc,US30_otc,UK100_otc"
+    "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,XAUUSD"
 )
-
 
 @dataclass(frozen=True)
 class Settings:
@@ -60,17 +43,19 @@ class Settings:
 
     whitelist: Tuple[str, ...] = tuple(_list("ASSET_WHITELIST", DEFAULT_WHITELIST))
 
-    entry_tf_seconds: int = _i("ENTRY_TF_SECONDS", 300)
+    entry_tf_seconds: int = _i("ENTRY_TF_SECONDS", 60)
     bias_tf_seconds: Tuple[int, int] = (14400, 3600)
     expiry_candles: int = min(max(_i("EXPIRY_CANDLES", 1), 1), 2)
-    signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 30), 1), 60)
+    
+    # সিগন্যাল ১২০ সেকেন্ড পর্যন্ত ভ্যালিড থাকবে
+    signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 120), 1), 300)
 
-    strategy_mode: str = os.getenv("STRATEGY_MODE", "rulebook").lower()
-    web_timeframe_seconds: int = _i("WEB_TIMEFRAME_SECONDS", 300)
+    strategy_mode: str = os.getenv("STRATEGY_MODE", "quick").lower()
+    web_timeframe_seconds: int = _i("WEB_TIMEFRAME_SECONDS", 60)
 
     prepare_alert_seconds: int = _i("PREPARE_ALERT_SECONDS", 0)
     prepare_min_score: int = _i("PREPARE_MIN_SCORE", 45)
-    prepare_max_per_cycle: int = _i("PREPARE_MAX_PER_CYCLE", 3)
+    prepare_max_per_cycle: int = _i("PREPARE_MAX_PER_CYCLE", 1)
 
     max_risk_pct: float = min(max(_f("MAX_RISK_PCT", 1.0), 0.1), 2.0)
     daily_loss_pct: float = min(max(_f("DAILY_LOSS_PCT", 5.0), 0.5), 5.0)
@@ -81,19 +66,19 @@ class Settings:
     min_payout_pct: float = max(_f("MIN_PAYOUT_PCT", 65.0), 65.0)
     max_concurrent_trades: int = 1
 
-    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 20)
+    max_signals_per_day: int = _i("MAX_SIGNALS_PER_DAY", 50)
     asset_loss_lock: int = _i("ASSET_LOSS_LOCK", 3)
 
     mtg_enabled: bool = _b("MTG_ENABLED", False)
     mtg_max_steps: int = min(max(_i("MTG_MAX_STEPS", 1), 1), 2)
     mtg_base_risk_pct: float = min(max(_f("MTG_BASE_RISK_PCT", 0.5), 0.1), 1.0)
 
-    score_threshold: int = _i("SCORE_THRESHOLD", 65) # ৭৫ থেকে কমিয়ে ৬৫ করা হলো
+    score_threshold: int = _i("SCORE_THRESHOLD", 65)
     watchlist_threshold: int = 45
 
     rsi_period: int = 14
-    rsi_buy_max: float = 35.0 # আগে ছিল ৩০, একটু শিথিল করা হলো
-    rsi_sell_min: float = 65.0 # আগে ছিল ৭০
+    rsi_buy_max: float = 35.0
+    rsi_sell_min: float = 65.0
     rsi_buy_strict: float = 25.0
     rsi_sell_strict: float = 75.0
     macd_fast: int = 12
@@ -104,20 +89,18 @@ class Settings:
     atr_period: int = 14
     ema_bias: int = 200
 
-    # --- SMC সেটিংস শিথিল করা হলো যাতে বেশি সিগন্যাল পাওয়া যায় ---
-    fresh_zone_lookback: int = 40   # জোন ৪০ ক্যান্ডেল পর্যন্ত ভ্যালিড থাকবে (আগে ২০ ছিল)
-    swing_lookback: int = 3         # ৩ ক্যান্ডেলে সুইং খুঁজবে (আগে ৫ ছিল)
+    fresh_zone_lookback: int = 40
+    swing_lookback: int = 3
 
     min_body_ratio: float = 0.50
     min_pattern_body_ratio: float = 0.30
     max_wick_body_mult: float = 2.0
     volume_lookback: int = 20
 
-    # --- Session Filter (২৪ ঘণ্টা খোলা) ---
-    london_kz: Tuple[int, int] = (0, 24) # লন্ডন সেশন ২৪ ঘণ্টা ধরা হলো
-    newyork_kz: Tuple[int, int] = (0, 24) # নিউইয়র্ক সেশন ২৪ ঘণ্টা ধরা হলো
+    london_kz: Tuple[int, int] = (0, 24)
+    newyork_kz: Tuple[int, int] = (0, 24)
     otc_size_multiplier: float = 0.5
-    otc_block_minutes: int = 5 # আগে ছিল ১৫, ওপেনিং ব্লক কমানো হলো
+    otc_block_minutes: int = 5
     otc_atr_max_mult: float = 2.0
 
     news_block_before_min: int = 15
@@ -139,11 +122,9 @@ class Settings:
     sweep_min_wick_ratio: float = _f("SWEEP_MIN_WICK_RATIO", 0.30)
     impulse_body_mult: float = _f("IMPULSE_BODY_MULT", 1.2)
     three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)
-    
-    min_entry_candles: int = 30 # আগে ছিল ৬০, এখন ৩০ ক্যান্ডেল পেলেই স্ক্যান করবে
-    min_bias_candles: int = 100 # আগে ছিল ২০০
+    min_entry_candles: int = 20
+    min_bias_candles: int = 100
     stake_min: float = 1.0
-    
     news_calendar_url: str = os.getenv("NEWS_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
     news_enabled: bool = _b("NEWS_ENABLED", True)
     news_fail_policy: str = os.getenv("NEWS_FAIL_POLICY", "block").lower()
@@ -156,35 +137,25 @@ class Settings:
     scan_delay_seconds: float = _f("SCAN_DELAY_SECONDS", 0.5)
     daily_report_hour_utc: int = _i("DAILY_REPORT_HOUR_UTC", 17)
 
-    data_source: str = os.getenv("DATA_SOURCE", "synthetic").lower()
+    data_source: str = os.getenv("DATA_SOURCE", "biquote").lower()
     csv_dir: str = os.getenv("CSV_DIR", "data")
 
     port: int = _i("PORT", 10000)
 
-
 settings = Settings()
-
 
 def is_otc(asset: str) -> bool:
     return asset.lower().endswith("_otc")
 
-
 def validate() -> List[str]:
     warnings = []
-    if settings.account_type != "DEMO":
-        warnings.append("ACCOUNT_TYPE is not DEMO.")
-    if settings.execution_mode != "signal_only":
-        warnings.append("EXECUTION_MODE=execute. Default should be signal_only.")
-    if settings.mtg_enabled:
-        warnings.append("MTG is ENABLED. Max %d step(s)." % settings.mtg_max_steps)
-    if not settings.whitelist:
-        warnings.append("ASSET_WHITELIST empty -> bot will never trade.")
-    if not settings.telegram_token or not settings.telegram_chat_id:
-        warnings.append("Telegram token/chat id missing -> signals cannot be delivered.")
-    if settings.data_source not in ("biquote", "csv", "synthetic"):
-        warnings.append(f"DATA_SOURCE='{settings.data_source}' not supported.")
+    if settings.account_type != "DEMO": warnings.append("ACCOUNT_TYPE is not DEMO.")
+    if settings.execution_mode != "signal_only": warnings.append("EXECUTION_MODE=execute. Default should be signal_only.")
+    if settings.mtg_enabled: warnings.append("MTG is ENABLED. Max %d step(s)." % settings.mtg_max_steps)
+    if not settings.whitelist: warnings.append("ASSET_WHITELIST empty -> bot will never trade.")
+    if not settings.telegram_token or not settings.telegram_chat_id: warnings.append("Telegram token/chat id missing.")
+    if settings.data_source not in ("biquote", "csv", "synthetic", "quotex"): warnings.append(f"DATA_SOURCE='{settings.data_source}' not supported.")
     return warnings
-
 
 TIMEFRAME_STRATEGY_MAP = {
     60:   "quick",
@@ -192,7 +163,6 @@ TIMEFRAME_STRATEGY_MAP = {
     900:  "rulebook",
     3600: "rulebook",
 }
-
 
 def strategy_for_timeframe(tf_seconds: int) -> str:
     return TIMEFRAME_STRATEGY_MAP.get(int(tf_seconds), "rulebook")
