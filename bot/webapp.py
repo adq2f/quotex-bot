@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask: auth + dashboard + bot control + settings (timeframe, MTG1, max signals) + history + diagnostics."""
+"""webapp.py  --  Flask: auth + dashboard + bot control + settings + history + diagnostics."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -86,12 +86,20 @@ def create_app(bot, controller: BotController) -> Flask:
     def api_bot_status():
         controller.touch_keepalive()
         return jsonify({
-            "controller": controller.status(), "risk": bot.risk.snapshot(datetime.now(timezone.utc)),
-            "mode": bot.cfg.execution_mode, "account": bot.cfg.account_type,
-            "mtg_enabled": bot.cfg.mtg_enabled, "whitelist": list(bot.cfg.whitelist),
-            "summary": bot.summary_numbers(), "recent": store.list_signals(limit=20),
-            "strategy_mode": bot.cfg.strategy_mode, "timeframe_seconds": bot.cfg.entry_tf_seconds,
-            "feed": bot.feed_label()})
+            "controller": controller.status(), 
+            "risk": bot.risk.snapshot(datetime.now(timezone.utc)),
+            "mode": bot.cfg.execution_mode, 
+            "account": bot.cfg.account_type,
+            "mtg_enabled": bot.cfg.mtg_enabled, 
+            "whitelist": list(bot.cfg.whitelist),
+            "summary": bot.summary_numbers(), 
+            "recent": store.list_signals(limit=20),
+            "strategy_mode": bot.cfg.strategy_mode, 
+            "timeframe_seconds": bot.cfg.entry_tf_seconds,
+            "feed": bot.feed_label(),
+            "signals_today": bot.risk.s.get("signals_today", 0),
+            "max_signals": bot.cfg.max_signals_per_day
+        })
 
     @app.post("/api/bot/start")
     @_auth_required
