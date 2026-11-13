@@ -4,6 +4,4 @@ matplotlib>=3.7
 flask>=3.0
 requests>=2.31
 python-dotenv>=1.0
-
-# Turso Cloud Database
 libsql>=0.1.0
