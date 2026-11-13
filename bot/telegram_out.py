@@ -1,86 +1,43 @@
 """telegram_out.py -- delivery via Telegram Bot API with verbose logging."""
 import html
 import time
-
 import requests
-
 from .logger import log
-
 
 class Telegram:
     def __init__(self, cfg):
         self.token = (cfg.telegram_token or "").strip()
         self.chat = (cfg.telegram_chat_id or "").strip()
         self.enabled = bool(self.token and self.chat)
-        # mask token for logs
         masked = (self.token[:8] + "..." + self.token[-4:]) if len(self.token) > 12 else "<empty>"
-        log("telegram_init",
-            enabled=self.enabled,
-            token_prefix=masked,
-            chat_id=self.chat or "<empty>")
+        log("telegram_init", enabled=self.enabled, token_prefix=masked, chat_id=self.chat or "<empty>")
 
-    # ------------------------------------------------------------------ core
     def _post(self, method: str, timeout: int = 25, **kw):
         if not self.enabled:
-            log("telegram_skipped",
-                reason="token_or_chat_missing",
-                token=bool(self.token),
-                chat=bool(self.chat),
-                method=method)
+            log("telegram_skipped", reason="token_or_chat_missing", method=method)
             return False
 
         url = f"https://api.telegram.org/bot{self.token}/{method}"
-
         for attempt in range(3):
             try:
                 r = requests.post(url, timeout=timeout, **kw)
-
-                # Success
                 if r.status_code == 200:
-                    try:
-                        data = r.json()
-                    except Exception:
-                        data = {}
+                    data = r.json()
                     if data.get("ok") is False:
-                        log("telegram_api_error",
-                            method=method,
-                            status=r.status_code,
-                            description=str(data.get("description", ""))[:200])
+                        log("telegram_api_error", method=method, description=str(data.get("description", ""))[:200])
                         return False
-                    log("telegram_sent", method=method, attempt=attempt + 1)
                     return True
-
-                # Rate limited
                 if r.status_code == 429:
                     retry = r.json().get("parameters", {}).get("retry_after", 3)
                     log("telegram_rate_limited", method=method, retry_after=retry)
                     time.sleep(retry + 1)
                     continue
-
-                # Other error
-                body_snippet = (r.text or "")[:300]
-                log("telegram_error",
-                    method=method,
-                    status=r.status_code,
-                    body=body_snippet)
-
-                # Common errors and hints
-                if r.status_code == 401:
-                    log("telegram_hint", msg="Bot token is invalid. Check TELEGRAM_BOT_TOKEN.")
-                elif r.status_code == 400:
-                    if "chat not found" in body_snippet.lower():
-                        log("telegram_hint", msg="Chat ID invalid or bot not added to the chat.")
-                    elif "not enough rights" in body_snippet.lower():
-                        log("telegram_hint", msg="Bot lacks permission to send messages in this chat.")
-                elif r.status_code == 403:
-                    log("telegram_hint", msg="Bot was blocked by the user/chat.")
-
-                # Retry on 5xx
                 if r.status_code >= 500:
                     time.sleep(2 + attempt)
                     continue
+                body_snippet = (r.text or "")[:300]
+                log("telegram_error", method=method, status=r.status_code, body=body_snippet)
                 return False
-
             except requests.exceptions.Timeout:
                 log("telegram_timeout", method=method, attempt=attempt + 1)
                 time.sleep(1.5)
@@ -92,7 +49,6 @@ class Telegram:
                 time.sleep(1.0)
         return False
 
-    # ------------------------------------------------------------------ public
     def message(self, text: str, pre: bool = False) -> bool:
         body = f"<pre>{html.escape(text)}</pre>" if pre else text
         return self._post("sendMessage", data={
@@ -107,7 +63,7 @@ class Telegram:
             with open(path, "rb") as f:
                 return self._post("sendPhoto", data={
                     "chat_id": self.chat,
-                    "caption": caption[:1000],
+                    "caption": caption[:1020], # Telegram caption limit is 1024 chars
                     "parse_mode": "HTML",
                 }, files={"photo": f})
         except FileNotFoundError:
@@ -117,16 +73,9 @@ class Telegram:
             log("telegram_photo_failed", error=str(e)[:200])
             return False
 
-    # ------------------------------------------------------------------ diagnostic
     def test(self) -> dict:
-        """Send a test message and return diagnostic details."""
         if not self.enabled:
-            return {
-                "ok": False,
-                "reason": "token_or_chat_missing",
-                "token_set": bool(self.token),
-                "chat_set": bool(self.chat),
-            }
+            return {"ok": False, "reason": "token_or_chat_missing", "token_set": bool(self.token), "chat_set": bool(self.chat)}
         try:
             url = f"https://api.telegram.org/bot{self.token}/getMe"
             r = requests.get(url, timeout=15)
@@ -144,12 +93,6 @@ class Telegram:
                 "text": test_text,
                 "parse_mode": "HTML",
             })
-            return {
-                "ok": bot_ok and sent,
-                "bot_ok": bot_ok,
-                "bot_username": bot_username,
-                "send_ok": sent,
-                "chat_id": self.chat,
-            }
+            return {"ok": bot_ok and sent, "bot_ok": bot_ok, "bot_username": bot_username, "send_ok": sent, "chat_id": self.chat}
         except Exception as e:
             return {"ok": False, "error": str(e)[:300]}
