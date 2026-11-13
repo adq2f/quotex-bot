@@ -64,10 +64,9 @@ class RiskManager:
         if pending >= c.max_concurrent_trades: return False, "Trade already open"
         if payout_pct < c.min_payout_pct: return False, f"Payout {payout_pct:.0f}% too low"
         
+        # ডেইলি লিমিট চেক এখান থেকে সরিয়ে দেওয়া হয়েছে (main.py তে আছে)
+        
         if not is_mtg:
-            if self.s["signals_today"] >= c.max_signals_per_day: 
-                return False, "Max signals/day reached"
-            
             sym = base_symbol(asset)
             for ts, a2, d2 in self.s["recent"]:
                 t = datetime.fromisoformat(ts)
