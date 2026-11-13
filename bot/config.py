@@ -88,12 +88,12 @@ class Settings:
     mtg_max_steps: int = min(max(_i("MTG_MAX_STEPS", 1), 1), 2)
     mtg_base_risk_pct: float = min(max(_f("MTG_BASE_RISK_PCT", 0.5), 0.1), 1.0)
 
-    score_threshold: int = _i("SCORE_THRESHOLD", 55)
+    score_threshold: int = _i("SCORE_THRESHOLD", 65) # ৭৫ থেকে কমিয়ে ৬৫ করা হলো
     watchlist_threshold: int = 45
 
     rsi_period: int = 14
-    rsi_buy_max: float = 30.0
-    rsi_sell_min: float = 70.0
+    rsi_buy_max: float = 35.0 # আগে ছিল ৩০, একটু শিথিল করা হলো
+    rsi_sell_min: float = 65.0 # আগে ছিল ৭০
     rsi_buy_strict: float = 25.0
     rsi_sell_strict: float = 75.0
     macd_fast: int = 12
@@ -104,18 +104,20 @@ class Settings:
     atr_period: int = 14
     ema_bias: int = 200
 
-    fresh_zone_lookback: int = 20
-    swing_lookback: int = 5
+    # --- SMC সেটিংস শিথিল করা হলো যাতে বেশি সিগন্যাল পাওয়া যায় ---
+    fresh_zone_lookback: int = 40   # জোন ৪০ ক্যান্ডেল পর্যন্ত ভ্যালিড থাকবে (আগে ২০ ছিল)
+    swing_lookback: int = 3         # ৩ ক্যান্ডেলে সুইং খুঁজবে (আগে ৫ ছিল)
 
     min_body_ratio: float = 0.50
     min_pattern_body_ratio: float = 0.30
     max_wick_body_mult: float = 2.0
     volume_lookback: int = 20
 
-    london_kz: Tuple[int, int] = (8, 10)
-    newyork_kz: Tuple[int, int] = (13, 15)
+    # --- Session Filter (২৪ ঘণ্টা খোলা) ---
+    london_kz: Tuple[int, int] = (0, 24) # লন্ডন সেশন ২৪ ঘণ্টা ধরা হলো
+    newyork_kz: Tuple[int, int] = (0, 24) # নিউইয়র্ক সেশন ২৪ ঘণ্টা ধরা হলো
     otc_size_multiplier: float = 0.5
-    otc_block_minutes: int = 15
+    otc_block_minutes: int = 5 # আগে ছিল ১৫, ওপেনিং ব্লক কমানো হলো
     otc_atr_max_mult: float = 2.0
 
     news_block_before_min: int = 15
@@ -137,9 +139,11 @@ class Settings:
     sweep_min_wick_ratio: float = _f("SWEEP_MIN_WICK_RATIO", 0.30)
     impulse_body_mult: float = _f("IMPULSE_BODY_MULT", 1.2)
     three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)
-    min_entry_candles: int = 60
-    min_bias_candles: int = 200
+    
+    min_entry_candles: int = 30 # আগে ছিল ৬০, এখন ৩০ ক্যান্ডেল পেলেই স্ক্যান করবে
+    min_bias_candles: int = 100 # আগে ছিল ২০০
     stake_min: float = 1.0
+    
     news_calendar_url: str = os.getenv("NEWS_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
     news_enabled: bool = _b("NEWS_ENABLED", True)
     news_fail_policy: str = os.getenv("NEWS_FAIL_POLICY", "block").lower()
