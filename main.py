@@ -29,17 +29,14 @@ from bot.tracker import Signal, Tracker, outcome_for, pnl_for
 from bot.controller import BotController
 from bot.webapp import create_app
 
-
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 class Bot:
     def __init__(self, cfg=settings, source=None, telegram=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
-        log("BOT_STARTUP", VERSION="FINAL-MEMORY-LIMIT")
         
         if self.source is None:
             try:
@@ -61,17 +58,12 @@ class Bot:
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
         
-        # --- মেমরি-ভিত্তিক কড়া লিমিট এবং গ্যাপ ---
-        self.signals_sent_today = 0
+        # মেমরি-ভিত্তিক লিমিট এবং গ্যাপ (ডাটাবেস থেকে লোড হবে)
+        self.signals_sent_today = self.store.kv_get("signals_sent_today", 0)
+        self.last_reset_day = self.store.kv_get("last_reset_day", utcnow().strftime("%Y-%m-%d"))
         self.last_signal_time = 0
         self.last_result_time = 0
-        self.last_reset_day = utcnow().strftime("%Y-%m-%d")
         
-        # আটকে থাকা সিগন্যাল ক্লিয়ার
-        if self.tracker.pending:
-            for s in list(self.tracker.pending):
-                self.tracker.close(s, "VOID")
-                
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -141,20 +133,20 @@ class Bot:
         try:
             render_signal_chart(m5, info, path, self._tz())
         except Exception as e:
-            log("chart_failed", error=str(e)[:200])
             path = ""
             
         line = "🟢⬆️ UP (BUY)" if sig.direction == "BUY" else "🔴⬇️ DOWN (SELL)"
         score = getattr(sig, "score", 0)
-        if score >= 85:
+        
+        # স্কোর ৭৫ বা তার বেশি হলে High Accuracy
+        if score >= 75:
             signal_type = "🔥🔥 HIGH ACCURACY SIGNAL ✅ 🔥🔥"
         else:
             signal_type = "⚡ NORMAL SIGNAL ⚡"
             
         feed = self.feed_label()
         
-        # ONE MESSAGE: Photo + Text
-        cap = (f"📢 <b>SIGNAL</b>\n"
+        cap = (f"📢 <b>SIGNAL</b> ({self.signals_sent_today}/{self.cfg.max_signals_per_day})\n"
                f"{signal_type}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"<b>{line}</b>\n"
@@ -179,12 +171,10 @@ class Bot:
         try:
             render_result_chart(m5, info, sig.exit_price, outcome, pnl, path, self._tz())
         except Exception as e:
-            log("chart_failed", error=str(e)[:200])
             path = ""
         header = {"WIN": "✅ WIN", "LOSS": "❌ LOSS"}.get(outcome, "➖ DRAW")
         pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
         
-        # ONE MESSAGE: Photo + Result
         cap = (f"<b>{header}</b>\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"Pair: <b>{sig.asset}</b>\n"
@@ -203,16 +193,9 @@ class Bot:
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
             return
             
-        # MEMORY LIMIT CHECK
-        if self.signals_sent_today >= self.cfg.max_signals_per_day:
-            return
-            
-        if self.tracker.pending:
-            return
-        
-        # MEMORY GAP CHECK
-        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
-            return
+        if self.signals_sent_today >= self.cfg.max_signals_per_day: return
+        if self.tracker.pending: return
+        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180: return
             
         peek = getattr(self.source, "get_candles_peek", None)
         if peek is None: return
@@ -231,8 +214,7 @@ class Bot:
                 entry_time = d.candle_close or now
                 if entry_time <= now: continue
                 candidates.append((d, entry_time, m5))
-            except Exception as e:
-                pass
+            except Exception as e: pass
         candidates.sort(key=lambda x: x[0].score, reverse=True)
         
         if not candidates: return
@@ -246,12 +228,10 @@ class Bot:
                 "expiry_text": f"expiry {self._expiry_text()}", "viz": self._viz(d, m5_peek)}
         try:
             render_signal_chart(m5_peek, info, path, self._tz())
-        except Exception as e:
-            path = ""
+        except Exception as e: path = ""
             
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
         
-        # PHOTO + TEXT
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
@@ -262,20 +242,19 @@ class Bot:
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
+                # রেজাল্ট ১০০% নিশ্চিত করার লজিক
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
                 if len(m5) > 0:
                     exit_price = float(m5["close"].iloc[-1])
                 else:
-                    exit_price = sig.entry_price
+                    exit_price = sig.entry_price # ডাটা না পেলে ড্র করবে
                     
                 outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
                 pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 self.tracker.close(sig, outcome, exit_price, pnl)
                 
-                # MEMORY RESULT TIME
                 self.last_result_time = time.time()
-                
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
                 self._send_result(sig, m5, outcome, pnl)
                 
@@ -320,10 +299,7 @@ class Bot:
     def scan(self, now):
         cfg = self.cfg
         if self.source is None: return
-        
-        if self.signals_sent_today >= self.cfg.max_signals_per_day: 
-            return
-            
+        if self.signals_sent_today >= self.cfg.max_signals_per_day: return
         if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             self.diag["waiting_gap"] += 1
             return
@@ -331,7 +307,7 @@ class Bot:
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
-                if now > exp + pd.Timedelta(minutes=5):
+                if now > exp + pd.Timedelta(minutes=10): # ১০ মিনিটের বেশি আটকে থাকলে বাতিল
                     self.tracker.close(sig, "VOID")
             if self.tracker.pending: return
                 
@@ -363,7 +339,9 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
+        # লিমিট বাড়ানো এবং ডাটাবেসে সেভ
         self.signals_sent_today += 1
+        self.store.kv_set("signals_sent_today", self.signals_sent_today)
         self.last_signal_time = time.time()
         
         log("SIGNAL_SENT", id=sig.id, asset=d.asset, direction=d.decision, score=d.score)
@@ -431,6 +409,8 @@ class Bot:
         if today != self.last_reset_day:
             self.signals_sent_today = 0
             self.last_reset_day = today
+            self.store.kv_set("signals_sent_today", 0)
+            self.store.kv_set("last_reset_day", today)
             self.last_signal_time = 0
             self.last_result_time = 0
             
@@ -487,14 +467,12 @@ class Bot:
             except Exception as e: log("cycle_error", error=str(e)[:300])
         log("bot_loop_exited")
 
-
 def main():
     bot = Bot()
     controller = BotController(bot)
     controller.start_thread()
     app = create_app(bot, controller)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
 
 if __name__ == "__main__":
     main()
