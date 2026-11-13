@@ -98,7 +98,7 @@ def create_app(bot, controller: BotController) -> Flask:
             "strategy_mode": bot.cfg.strategy_mode, 
             "timeframe_seconds": bot.cfg.entry_tf_seconds,
             "feed": bot.feed_label(),
-            "signals_today": bot.risk.s.get("signals_today", 0),
+            "signals_today": bot.signals_sent_today,  # <--- মেমরি থেকে কাউন্টার নিচ্ছে
             "max_signals": bot.cfg.max_signals_per_day
         })
 
@@ -140,7 +140,6 @@ def create_app(bot, controller: BotController) -> Flask:
             if ms < 1 or ms > 100:
                 return jsonify({"error": "invalid max_signals_per_day"}), 400
             store.set_setting("max_signals_per_day", ms)
-            # সরাসরি বটের কনফিগে আপডেট করে দেওয়া হলো যাতে সাথে সাথে কাজ করে
             bot.cfg = dataclasses.replace(bot.cfg, max_signals_per_day=ms)
             
         bot._build_strategy()
