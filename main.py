@@ -29,16 +29,15 @@ from bot.tracker import Signal, Tracker, outcome_for, pnl_for
 from bot.controller import BotController
 from bot.webapp import create_app
 
-
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
 
 class Bot:
     def __init__(self, cfg=settings, source=None, telegram=None):
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
+        log("BOT_STARTUP", VERSION="FINAL-V8-MEMORY")
         
         if self.source is None:
             try:
@@ -60,7 +59,7 @@ class Bot:
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
         
-        # --- হার্ড মেমরি লিমিট এবং গ্যাপ ---
+        # --- মেমরি-ভিত্তিক কড়া লিমিট এবং গ্যাপ ---
         self.signals_sent_today = 0
         self.last_signal_time = 0
         self.last_result_time = 0
@@ -152,7 +151,7 @@ class Bot:
             
         feed = self.feed_label()
         
-        # এক মেসেজে ছবি এবং টেক্সট
+        # ONE MESSAGE: Photo + Text
         cap = (f"📢 <b>SIGNAL</b>\n"
                f"{signal_type}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
@@ -183,6 +182,7 @@ class Bot:
         header = {"WIN": "✅ WIN", "LOSS": "❌ LOSS"}.get(outcome, "➖ DRAW")
         pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
         
+        # ONE MESSAGE: Photo + Result
         cap = (f"<b>{header}</b>\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"Pair: <b>{sig.asset}</b>\n"
@@ -201,14 +201,14 @@ class Bot:
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
             return
             
-        # কড়া লিমিট চেক
+        # MEMORY LIMIT CHECK
         if self.signals_sent_today >= self.cfg.max_signals_per_day:
             return
             
         if self.tracker.pending:
             return
         
-        # ৩ মিনিট গ্যাপ চেক
+        # MEMORY GAP CHECK
         if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             return
             
@@ -249,6 +249,7 @@ class Bot:
             
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
         
+        # PHOTO + TEXT
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
@@ -270,7 +271,7 @@ class Bot:
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 self.tracker.close(sig, outcome, exit_price, pnl)
                 
-                # রেজাল্ট টাইম সেভ (মেমরিতে)
+                # MEMORY RESULT TIME
                 self.last_result_time = time.time()
                 
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
@@ -318,11 +319,9 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
-        # কড়া মেমরি লিমিট চেক
         if self.signals_sent_today >= self.cfg.max_signals_per_day: 
             return
             
-        # ৩ মিনিট গ্যাপ চেক (মেমরিতে)
         if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
             self.diag["waiting_gap"] += 1
             return
@@ -362,7 +361,6 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
-        # মেমরিতে সিগন্যাল কাউন্ট এবং টাইম সেভ
         self.signals_sent_today += 1
         self.last_signal_time = time.time()
         
@@ -427,7 +425,6 @@ class Bot:
             cleanup_old(self.cfg.charts_dir)
             return
             
-        # প্রতিদিন রিসেট লজিক
         today = now.strftime("%Y-%m-%d")
         if today != self.last_reset_day:
             self.signals_sent_today = 0
@@ -459,7 +456,6 @@ class Bot:
                 
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
-                        # মেমরি লিমিট চেক
                         if self.signals_sent_today < self.cfg.max_signals_per_day:
                             self._pre_scan(utcnow())
                             
@@ -489,14 +485,12 @@ class Bot:
             except Exception as e: log("cycle_error", error=str(e)[:300])
         log("bot_loop_exited")
 
-
 def main():
     bot = Bot()
     controller = BotController(bot)
     controller.start_thread()
     app = create_app(bot, controller)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-
 
 if __name__ == "__main__":
     main()
