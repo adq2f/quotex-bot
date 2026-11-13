@@ -57,6 +57,7 @@ class Bot:
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.stop_event = threading.Event()
+        self._pre_scan_candidate = None
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -133,11 +134,12 @@ class Bot:
             
         line = "🟢⬆️  UP  (BUY / CALL)" if sig.direction == "BUY" else "🔴⬇️  DOWN  (SELL / PUT)"
         
+        # Hybrid System (Normal vs High Accuracy)
         score = getattr(sig, "score", 0)
         if score >= 85:
-            signal_type = "🔥 <b>PREMIUM SIGNAL (High Accuracy)</b>"
+            signal_type = "🔥 <b>High Accuracy Signal ✅</b>"
         else:
-            signal_type = "⚡ <b>NORMAL SIGNAL (Quick Scalp)</b>"
+            signal_type = "⚡ <b>Normal Signal</b>"
             
         feed = self.feed_label()
         warn = ""
@@ -178,6 +180,7 @@ class Bot:
 
     def _pre_scan(self, now):
         cfg = self.cfg
+        self._pre_scan_candidate = None
         if cfg.prepare_alert_seconds <= 0 or self.source is None or self.pause_event.is_set():
             return
         if self.tracker.pending:
@@ -211,14 +214,13 @@ class Bot:
         
         if not candidates:
             return
-        top_candidates = candidates[:1]
+        top = candidates[0]
+        d, entry_time = top
+        self._pre_scan_candidate = (d.asset, d.decision)
         
-        for d, entry_time in top_candidates:
-            secs = int((entry_time - now).total_seconds())
-            line = "🟢⬆️ UP (BUY)" if d.decision == "BUY" else "🔴⬇️ DOWN (SELL)"
-            self.tg.message(f"⏰ <b>ENTRY IN {secs}s</b>\n{line}\nPair: <b>{d.asset}</b>\n"
-                            f"Confidence: {d.score}%\n<i>Heads-up only: final signal comes after the candle closes.</i>")
-            log("prepare_sent", asset=d.asset, direction=d.decision, seconds=secs)
+        # মেসেজ ১: ১৫ সেকেন্ড আগে শুধু মার্কেটের নাম
+        self.tg.message(f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>")
+        log("prepare_watch_sent", asset=d.asset, direction=d.decision)
 
     def resolve_due(self, now):
         cfg = self.cfg
@@ -258,7 +260,6 @@ class Bot:
             if not created:
                 fx.maybe_history_report(self)
                 
-            # Max Signal Limit Hit Check
             if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
                 if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
                     self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today. Bot will pause until tomorrow (00:00 UTC).")
@@ -313,7 +314,6 @@ class Bot:
             self.diag["no_source"] += 1
             return
             
-        # --- আটকে থাকা পেন্ডিং ট্রেড ক্লিয়ার করা ---
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
@@ -366,11 +366,9 @@ class Bot:
             return
         d, m5 = max(cands, key=lambda x: x[0].score * (self._payout(x[0].asset) / 100.0))
         
-        # সিগন্যাল বাতিল (Stale) হওয়ার সমস্যা ফিক্স করা হলো
         age = (utcnow() - d.candle_close).total_seconds()
         if age > cfg.signal_max_age_seconds:
             log("stale_signal_warning", asset=d.asset, age=round(age, 1))
-            # return  <-- এটি বন্ধ করা হলো, যাতে সিগন্যাল চলে যায়
             
         payout = self._payout(d.asset)
         ok, status = self.risk.can_open(d.asset, d.decision, now, payout, pending=0)
@@ -480,19 +478,38 @@ class Bot:
             tf = self.cfg.entry_tf_seconds
             next_boundary = (int(time.time() // tf) + 1) * tf
             prepare_sec = min(max(0, self.cfg.prepare_alert_seconds), max(0, tf - 5))
+            
             if prepare_sec > 0:
                 pre_at = next_boundary - prepare_sec
                 while time.time() < pre_at and not self.stop_event.is_set():
                     if self.cfg.entry_tf_seconds != tf:
                         break
                     time.sleep(min(0.5, max(0.0, pre_at - time.time())))
+                
                 if self.stop_event.is_set():
                     break
+                
                 if self.cfg.entry_tf_seconds == tf and time.time() >= pre_at:
                     try:
                         self._pre_scan(utcnow())
+                        
+                        # মেসেজ ২: ৫ সেকেন্ড আগে দিক (UP/DOWN) জানানো
+                        at_5s = next_boundary - 5
+                        while time.time() < at_5s and not self.stop_event.is_set():
+                            if self.cfg.entry_tf_seconds != tf:
+                                break
+                            time.sleep(min(0.5, max(0.0, at_5s - time.time())))
+                        
+                        if not self.stop_event.is_set() and self.cfg.entry_tf_seconds == tf and time.time() >= at_5s:
+                            if getattr(self, "_pre_scan_candidate", None):
+                                asset, direction = self._pre_scan_candidate
+                                line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
+                                self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
+                                log("prepare_5s_sent", asset=asset, direction=direction)
+                                self._pre_scan_candidate = None
                     except Exception as e:
                         log("pre_scan_cycle_error", error=str(e)[:300])
+
             alert_sec = int(os.getenv("MTG_ALERT_SECONDS", "10"))
             if alert_sec > 0 and self.cfg.mtg_enabled and self.tracker.pending:
                 at = next_boundary - alert_sec
@@ -503,10 +520,12 @@ class Bot:
                         fx.pre_mtg_alert(self, utcnow())
                     except Exception as e:
                         log("mtg_alert_error", error=str(e)[:200])
+                        
             while time.time() < next_boundary and not self.stop_event.is_set():
                 if self.cfg.entry_tf_seconds != tf:
                     break
                 time.sleep(min(0.5, max(0.0, next_boundary - time.time())))
+                
             if self.stop_event.is_set():
                 break
             if self.cfg.entry_tf_seconds != tf:
