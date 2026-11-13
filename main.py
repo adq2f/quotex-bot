@@ -58,12 +58,17 @@ class Bot:
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
         
-        # মেমরি-ভিত্তিক লিমিট এবং গ্যাপ (ডাটাবেস থেকে লোড হবে)
+        # মেমরি-ভিত্তিক লিমিট এবং গ্যাপ
         self.signals_sent_today = self.store.kv_get("signals_sent_today", 0)
         self.last_reset_day = self.store.kv_get("last_reset_day", utcnow().strftime("%Y-%m-%d"))
         self.last_signal_time = 0
         self.last_result_time = 0
         
+        # আটকে থাকা সিগন্যাল ক্লিয়ার
+        if self.tracker.pending:
+            for s in list(self.tracker.pending):
+                self.tracker.close(s, "VOID")
+                
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -138,7 +143,6 @@ class Bot:
         line = "🟢⬆️ UP (BUY)" if sig.direction == "BUY" else "🔴⬇️ DOWN (SELL)"
         score = getattr(sig, "score", 0)
         
-        # স্কোর ৭৫ বা তার বেশি হলে High Accuracy
         if score >= 75:
             signal_type = "🔥🔥 HIGH ACCURACY SIGNAL ✅ 🔥🔥"
         else:
@@ -242,17 +246,15 @@ class Bot:
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
-                # রেজাল্ট ১০০% নিশ্চিত করার লজিক
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
                 if len(m5) > 0:
                     exit_price = float(m5["close"].iloc[-1])
                 else:
-                    exit_price = sig.entry_price # ডাটা না পেলে ড্র করবে
+                    exit_price = sig.entry_price
                     
                 outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
                 pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
                 self.risk.record_result(sig.asset, outcome, pnl, now)
-                self.tracker.close(sig, outcome, exit_price, pnl)
                 
                 self.last_result_time = time.time()
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
@@ -272,6 +274,11 @@ class Bot:
                         self.send_daily_summary(now)
             except Exception as e:
                 log("resolve_error", id=sig.id, error=str(e)[:200])
+            finally:
+                # জোরপূর্বক সিগন্যাল ক্লিয়ার করা, যাতে বট আটকে না থাকে
+                if sig in self.tracker.pending:
+                    self.tracker.close(sig, "VOID")
+                    self.last_result_time = time.time()
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
@@ -307,7 +314,7 @@ class Bot:
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
-                if now > exp + pd.Timedelta(minutes=10): # ১০ মিনিটের বেশি আটকে থাকলে বাতিল
+                if now > exp + pd.Timedelta(minutes=5):
                     self.tracker.close(sig, "VOID")
             if self.tracker.pending: return
                 
@@ -339,7 +346,6 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
-        # লিমিট বাড়ানো এবং ডাটাবেসে সেভ
         self.signals_sent_today += 1
         self.store.kv_set("signals_sent_today", self.signals_sent_today)
         self.last_signal_time = time.time()
