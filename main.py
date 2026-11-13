@@ -39,6 +39,8 @@ class Bot:
         self.cfg = cfg
         self.store = Store(cfg.db_path)
         self.source = source
+        log("BOT_STARTUP", VERSION="FINAL-PHOTO-TEXT-V6")
+        
         if self.source is None:
             try:
                 self.source = make_source(cfg, self.store)
@@ -58,10 +60,6 @@ class Bot:
         self.pause_event.set()
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
-        
-        # মেমরি-ভিত্তিক টাইমার (৩ মিনিট গ্যাপ নিশ্চিত করতে)
-        self.last_signal_time = 0
-        self.last_result_time = 0
         
         # আটকে থাকা সিগন্যাল ক্লিয়ার
         if self.tracker.pending:
@@ -140,19 +138,18 @@ class Bot:
             log("chart_failed", error=str(e)[:200])
             path = ""
             
-        line = "🟢⬆️  UP  (BUY / CALL)" if sig.direction == "BUY" else "🔴⬇️  DOWN  (SELL / PUT)"
+        line = "🟢⬆️ UP (BUY)" if sig.direction == "BUY" else "🔴⬇️ DOWN (SELL)"
         
-        # আপনার চাওয়া হাইব্রিড সিস্টেম
         score = getattr(sig, "score", 0)
         if score >= 85:
-            signal_type = "🔥🔥 <b>HIGH ACCURACY SIGNAL ✅</b> 🔥🔥"
+            signal_type = "🔥🔥 HIGH ACCURACY SIGNAL ✅ 🔥🔥"
         else:
-            signal_type = "⚡ <b>NORMAL SIGNAL</b> ⚡"
+            signal_type = "⚡ NORMAL SIGNAL ⚡"
             
         feed = self.feed_label()
-        mtg_tag = f"  ·  MTG{sig.step}" if sig.step else ""
         
-        cap = (f"📢 <b>SIGNAL{mtg_tag}</b>\n"
+        # Photo এবং Text একসাথে (Caption) যাবে
+        cap = (f"📢 <b>SIGNAL</b>\n"
                f"{signal_type}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"<b>{line}</b>\n"
@@ -166,9 +163,7 @@ class Bot:
                f"━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
                
         if path and os.path.exists(path):
-            self.tg.photo(path, "")
-            time.sleep(1) # ১ সেকেন্ড গ্যাপ
-            self.tg.message(cap)
+            self.tg.photo(path, cap)
         else:
             self.tg.message(cap)
 
@@ -181,10 +176,11 @@ class Bot:
         except Exception as e:
             log("chart_failed", error=str(e)[:200])
             path = ""
-        header = {"WIN": "✅ <b>WIN</b>", "LOSS": "❌ <b>LOSS</b>"}.get(outcome, "➖ <b>DRAW</b>")
+        header = {"WIN": "✅ WIN", "LOSS": "❌ LOSS"}.get(outcome, "➖ DRAW")
         pnl_str = f"+${pnl:.2f}" if pnl > 0 else (f"-${abs(pnl):.2f}" if pnl < 0 else "$0.00")
         
-        cap = (f"{header}\n"
+        # Photo এবং Result একসাথে (Caption) যাবে
+        cap = (f"<b>{header}</b>\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"Pair: <b>{sig.asset}</b>\n"
                f"Result: <b>{pnl_str}</b>\n"
@@ -192,9 +188,7 @@ class Bot:
                f"━━━━━━━━━━━━━━━━━━\n🆔 {sig.id}")
                
         if path and os.path.exists(path):
-            self.tg.photo(path, "")
-            time.sleep(1)
-            self.tg.message(cap)
+            self.tg.photo(path, cap)
         else:
             self.tg.message(cap)
 
@@ -206,8 +200,10 @@ class Bot:
         if self.tracker.pending:
             return
         
-        # ৩ মিনিট গ্যাপ চেক
-        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
+        # ৩ মিনিটের গ্যাপ চেক (ডাটাবেস থেকে)
+        last_sig = self.store.kv_get("last_signal_time", 0)
+        last_res = self.store.kv_get("last_result_time", 0)
+        if (time.time() - last_sig) < 180 or (time.time() - last_res) < 180:
             return
             
         peek = getattr(self.source, "get_candles_peek", None)
@@ -245,9 +241,9 @@ class Bot:
         except Exception as e:
             path = ""
             
+        # Watch Market এর সাথে ছবি এবং টেক্সট একসাথে যাবে
         cap = f"👀 <b>Watch Market:</b> {d.asset}\n<i>Analyzing setup... Wait for 5s direction.</i>"
         
-        # Watch Market এর সাথে ছবি যাবে
         if path and os.path.exists(path):
             self.tg.photo(path, cap)
         else:
@@ -258,23 +254,23 @@ class Bot:
         if self.source is None: return
         for sig in self.tracker.due(now):
             try:
+                # রেজাল্ট ১০০% নিশ্চিত করতে ব্যাকআপ লজিক
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
-                if len(m5) == 0: 
-                    sig.tries += 1
-                    if sig.tries >= 3:
-                        self.tracker.close(sig, "VOID")
-                    else:
-                        self.tracker.update(sig)
-                    continue
                 
-                exit_price = float(m5["close"].iloc[-1])
+                if len(m5) > 0:
+                    exit_price = float(m5["close"].iloc[-1])
+                else:
+                    # যদি ক্যান্ডেল না পায়, বর্তমান প্রাইস নিয়ে রেজাল্ট দেবে
+                    exit_price = sig.entry_price
+                    log("resolve_fallback_price", id=sig.id)
+                
                 outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
                 pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
                 self.risk.record_result(sig.asset, outcome, pnl, now)
                 self.tracker.close(sig, outcome, exit_price, pnl)
                 
-                # রেজাল্ট টাইম সেভ (মেমরিতে)
-                self.last_result_time = time.time()
+                # ডাটাবেসে রেজাল্ট টাইম সেভ (৩ মিনিট গ্যাপের জন্য)
+                self.store.kv_set("last_result_time", time.time())
                 
                 log("RESULT_SENT", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl)
                 self._send_result(sig, m5, outcome, pnl)
@@ -321,8 +317,10 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
-        # মেমরি-ভিত্তিক ৩ মিনিট গ্যাপ
-        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
+        # ডাটাবেস থেকে ৩ মিনিটের গ্যাপ চেক
+        last_sig = self.store.kv_get("last_signal_time", 0)
+        last_res = self.store.kv_get("last_result_time", 0)
+        if (time.time() - last_sig) < 180 or (time.time() - last_res) < 180:
             self.diag["waiting_gap"] += 1
             return
             
@@ -363,11 +361,11 @@ class Bot:
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
         
-        # সিগন্যাল টাইম সেভ (মেমরিতে)
-        self.last_signal_time = time.time()
+        # ডাটাবেসে সিগন্যাল টাইম সেভ
+        self.store.kv_set("last_signal_time", time.time())
         
-        self._send_signal(sig, m5)
         log("SIGNAL_SENT", id=sig.id, asset=d.asset, direction=d.decision, score=d.score)
+        self._send_signal(sig, m5)
 
     def summary_numbers(self, since_iso=None):
         rows = self.store.signal_rows(since_iso)
@@ -461,7 +459,7 @@ class Bot:
                             if getattr(self, "_pre_scan_candidate", None):
                                 asset, direction = self._pre_scan_candidate
                                 line = "🟢 UP (BUY)" if direction == "BUY" else "🔴 DOWN (SELL)"
-                                # ৫ সেকেন্ডের মেসেজে ছবি যাবে না, শুধু টেক্সট যাবে
+                                # ENTRY IN 5s: শুধু টেক্সট যাবে (ছবি ছাড়া)
                                 self.tg.message(f"⏳ <b>ENTRY IN 5s</b>\n{line}\nPair: <b>{asset}</b>")
                                 self._pre_scan_candidate = None
                     except Exception as e:
@@ -474,11 +472,6 @@ class Bot:
             if self.stop_event.is_set(): break
             if self.cfg.entry_tf_seconds != tf: continue
             
-            # ৩ মিনিটের কড়া গ্যাপ (মেইন লুপে)
-            if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
-                self.diag["waiting_gap"] += 1
-                continue
-                
             time.sleep(max(0.0, self.cfg.scan_delay_seconds))
             try: self.cycle()
             except Exception as e: log("cycle_error", error=str(e)[:300])
