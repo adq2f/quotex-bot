@@ -3,7 +3,7 @@
     const fmtMoney = (v) => v == null ? '—' : (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const cls = (v) => v > 0 ? 'text-success' : v < 0 ? 'text-danger' : '';
-    const STRAT = {60: 'Quick Multi-Strategy (1M)', 300: 'Rulebook (SMC 5M)'};
+    const STRAT = {60: 'Fast Scalp (1M)', 300: 'Rulebook (SMC 5M)'};
     const label = (tf) => STRAT[tf] || 'Rulebook (SMC)';
 
     function pill(st) {
@@ -20,6 +20,10 @@
             pill(d);
             $('mode').textContent = d.mode; $('account').textContent = d.account; $('feed').textContent = d.feed || '—';
             $('asset-count').textContent = (d.whitelist || []).length;
+            
+            if (d.signals_today !== undefined) $('live-sig-count').textContent = d.signals_today;
+            if (d.max_signals !== undefined) $('live-max-sig').textContent = d.max_signals;
+
             $('assets').textContent = (d.whitelist || []).slice(0, 12).join(', ') + ((d.whitelist || []).length > 12 ? ' …' : '');
             const rk = d.risk || {}, pnl = rk.day_pnl ?? 0;
             $('r-balance').textContent = '$' + (rk.balance ?? 0).toFixed(2);
@@ -27,12 +31,14 @@
             $('r-consec').textContent = rk.consec_losses ?? 0;
             $('r-cooldown').textContent = rk.cooldown_until ? rk.cooldown_until.slice(11, 16) + ' UTC' : '—';
             $('readonly-banner').classList.toggle('d-none', !rk.read_only);
+            
             for (const k of ['all', 'base', 'mtg']) {
                 const a = (d.summary || {})[k] || {};
                 $('s-' + k + '-winrate').textContent = a.win_rate == null ? '—' : a.win_rate + '%';
                 $('s-' + k + '-pf').textContent = a.profit_factor ?? '—';
                 const c = $('s-' + k + '-pnl'); c.textContent = fmtMoney(a.pnl ?? 0); c.className = cls(a.pnl ?? 0);
             }
+            
             const tb = $('signals-body');
             tb.innerHTML = !d.recent || !d.recent.length
                 ? '<tr><td colspan="10" class="text-center text-secondary">No signals yet</td></tr>'
@@ -69,6 +75,7 @@
         if (r.status === 401) { location.href = '/login'; return; }
         await refresh();
     }
+    
     const save = (body) => fetch('/api/settings', { method: 'POST', credentials: 'same-origin',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
 
