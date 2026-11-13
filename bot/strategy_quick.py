@@ -1,6 +1,7 @@
 """
-strategy_quick.py  --  Multi-Strategy Engine with Market Context Analysis.
-Determines if market is Strong Up, Normal Up, Stable, Normal Down, or Strong Down.
+strategy_quick.py  --  1-Minute High Accuracy Scalper (3-in-1 System)
+Combines Breakout, Mean Reversion (BB Bounce), and Trend Pullback.
+Always provides a signal if momentum and candle color align.
 """
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,15 +18,14 @@ class QuickDecision:
     candle_close: Optional[datetime] = None
     notes: str = ""
     gate: str = ""
-    market_context: str = ""
-    strategy_used: str = ""
 
 class QuickStrategy:
     def __init__(self, cfg, news=None):
         self.cfg = cfg
         self.news = news
 
-    def _ema(self, s, n): return s.ewm(span=n, adjust=False).mean()
+    def _ema(self, s, n): 
+        return s.ewm(span=n, adjust=False).mean()
     
     def _rsi(self, s, n=14):
         d = s.diff()
@@ -43,33 +43,22 @@ class QuickStrategy:
         mid = s.rolling(n).mean()
         sd = s.rolling(n).std(ddof=0)
         return mid + k * sd, mid, mid - k * sd
-        
-    def _atr(self, df, n=14):
-        tr = pd.concat([df["high"] - df["low"], (df["high"] - df["close"].shift()).abs(), (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
-        return tr.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
 
-    def _get_market_context(self, df, ema20, ema50, ema200, adx):
-        c = df["close"].iloc[-1]
-        e20, e50, e200 = ema20.iloc[-1], ema50.iloc[-1], ema200.iloc[-1]
-        adx_val = adx.iloc[-1]
-        
-        dist = abs(c - e20) / e20
-        
-        if adx_val < 20:
-            return "STABLE"
-        if c > e20 > e50 > e200:
-            return "STRONG_UP" if dist > 0.0005 else "NORMAL_UP"
-        if c < e20 < e50 < e200:
-            return "STRONG_DOWN" if dist > 0.0005 else "NORMAL_DOWN"
-        if c > e20 > e50:
-            return "NORMAL_UP"
-        if c < e20 < e50:
-            return "NORMAL_DOWN"
-        return "STABLE"
+    def _make_buy(self, d, score, reason):
+        d.decision = "BUY"
+        d.score = score
+        d.notes = reason
+        return d
+
+    def _make_sell(self, d, score, reason):
+        d.decision = "SELL"
+        d.score = score
+        d.notes = reason
+        return d
 
     def evaluate(self, asset, m5, h1, h4, now):
         d = QuickDecision(asset=asset)
-        if len(m5) < 100: 
+        if len(m5) < 30: 
             d.gate = "warmup"
             return d
 
@@ -78,80 +67,63 @@ class QuickStrategy:
         d.entry_price = float(m5["close"].iloc[-1])
 
         close = m5["close"]
-        ema20 = self._ema(close, 20)
-        ema50 = self._ema(close, 50)
-        ema200 = self._ema(close, 200)
+        ema9 = self._ema(close, 9)
+        ema21 = self._ema(close, 21)
         rsi = self._rsi(close, 14)
-        _, _, hist = self._macd(close)
+        _, _, macd_hist = self._macd(close)
         bb_up, bb_mid, bb_lo = self._bb(close, 20, 2.0)
-        
-        # ADX
-        high, low = m5["high"], m5["low"]
-        up, dn = high.diff(), -low.diff()
-        plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=m5.index)
-        minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=m5.index)
-        atr = self._atr(m5, 14)
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / atr.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / atr.replace(0, np.nan))
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        adx = dx.ewm(alpha=1/14, adjust=False).mean()
 
         i = len(close) - 1
         c = float(close.iloc[i])
+        o = float(m5["open"].iloc[i])
+        
+        e9 = float(ema9.iloc[i])
+        e21 = float(ema21.iloc[i])
         r = float(rsi.iloc[i])
-        mh = float(hist.iloc[i])
-        bu, bl = float(bb_up.iloc[i]), float(bb_lo.iloc[i])
-        adx_val = float(adx.iloc[i])
-        pdi, mdi = float(plus_di.iloc[i]), float(minus_di.iloc[i])
+        mh = float(macd_hist.iloc[i])
+        bu = float(bb_up.iloc[i])
+        bl = float(bb_lo.iloc[i])
 
-        # মার্কেট অ্যানালাইসিস
-        context = self._get_market_context(m5, ema20, ema50, ema200, adx)
-        d.market_context = context
+        is_green = c > o
+        is_red = c < o
 
-        # --- স্ট্র্যাটেজি ১: Bollinger Band Bounce (Stable Market) ---
-        if context == "STABLE":
-            d.strategy_used = "Bollinger Bounce"
-            if c <= bl and r < 30 and c > float(m5["open"].iloc[i]):
-                d.decision = "BUY"
-                d.score = 75 + (30 - r)
-                d.notes = f"Stable Market BB Bounce (RSI {r:.0f})"
-                return d
-            if c >= bu and r > 70 and c < float(m5["open"].iloc[i]):
-                d.decision = "SELL"
-                d.score = 75 + (r - 70)
-                d.notes = f"Stable Market BB Bounce (RSI {r:.0f})"
-                return d
+        # ==========================================
+        # 1. BREAKOUT STRATEGY (সবচেয়ে শক্তিশালী সিগন্যাল)
+        # ==========================================
+        # আগের ৩টি ক্যান্ডেলের হাই/লো ব্রেক করলে
+        prev_high = float(m5["high"].iloc[i-3:i].max())
+        prev_low = float(m5["low"].iloc[i-3:i].min())
+        
+        # ব্রেকআউট BUY: দাম আগের ৩ ক্যান্ডেলের উপরে গেল, ক্যান্ডেল সবুজ এবং RSI ৫০+
+        if c > prev_high and is_green and r > 50 and mh > 0:
+            return self._make_buy(d, 85, f"3-Candle High Breakout (RSI {r:.0f})")
+            
+        # ব্রেকআউট SELL: দাম আগের ৩ ক্যান্ডেলের নিচে গেল, ক্যান্ডেল লাল এবং RSI ৫০-
+        if c < prev_low and is_red and r < 50 and mh < 0:
+            return self._make_sell(d, 85, f"3-Candle Low Breakout (RSI {r:.0f})")
 
-        # --- স্ট্র্যাটেজি ২: Trend Pullback (Normal Trend) ---
-        elif context in ["NORMAL_UP", "STRONG_UP"]:
-            d.strategy_used = "Trend Pullback"
-            if c > ema50.iloc[i] and c <= ema20.iloc[i] * 1.002 and r < 45 and mh > float(hist.iloc[i-1]):
-                d.decision = "BUY"
-                d.score = 80
-                d.notes = f"{context} Pullback to EMA20 (RSI {r:.0f})"
-                return d
-                
-        elif context in ["NORMAL_DOWN", "STRONG_DOWN"]:
-            d.strategy_used = "Trend Pullback"
-            if c < ema50.iloc[i] and c >= ema20.iloc[i] * 0.998 and r > 55 and mh < float(hist.iloc[i-1]):
-                d.decision = "SELL"
-                d.score = 80
-                d.notes = f"{context} Pullback to EMA20 (RSI {r:.0f})"
-                return d
+        # ==========================================
+        # 2. MEAN REVERSION (যখন মার্কেট সাইডওয়ে থাকে)
+        # ==========================================
+        # বোলিঙ্গার ব্যান্ডের নিচে গিয়ে সবুজ ক্যান্ডেল হলে BUY
+        if c <= bl and r < 35 and is_green:
+            return self._make_buy(d, 80, f"BB Lower Bounce (RSI {r:.0f})")
+            
+        # বোলিঙ্গার ব্যান্ডের উপরে গিয়ে লাল ক্যান্ডেল হলে SELL
+        if c >= bu and r > 65 and is_red:
+            return self._make_sell(d, 80, f"BB Upper Rejection (RSI {r:.0f})")
 
-        # --- স্ট্র্যাটেজি ৩: Momentum Breakout (Strong Trend) ---
-        if context in ["STRONG_UP", "STRONG_DOWN"] and adx_val > 30:
-            d.strategy_used = "Momentum Breakout"
-            if context == "STRONG_UP" and c > m5["high"].iloc[i-3:i].max() and pdi > mdi:
-                d.decision = "BUY"
-                d.score = 85
-                d.notes = f"STRONG_UP Breakout (ADX {adx_val:.0f})"
-                return d
-            if context == "STRONG_DOWN" and c < m5["low"].iloc[i-3:i].min() and mdi > pdi:
-                d.decision = "SELL"
-                d.score = 85
-                d.notes = f"STRONG_DOWN Breakout (ADX {adx_val:.0f})"
-                return d
+        # ==========================================
+        # 3. TREND PULLBACK (যখন হালকা ট্রেন্ড থাকে)
+        # ==========================================
+        # আপট্রেন্ড + দাম EMA9-এর নিচে + সবুজ ক্যান্ডেল
+        if e9 > e21 and c < e9 and r < 45 and is_green:
+            return self._make_buy(d, 75, f"EMA Pullback BUY (RSI {r:.0f})")
+            
+        # ডাউনট্রেন্ড + দাম EMA9-এর উপরে + লাল ক্যান্ডেল
+        if e9 < e21 and c > e9 and r > 55 and is_red:
+            return self._make_sell(d, 75, f"EMA Pullback SELL (RSI {r:.0f})")
 
+        # এর বাইরে কোনো শর্ত মিললে সিগন্যাল দেবে না, অপেক্ষা করবে।
         d.gate = "filtered"
         return d
