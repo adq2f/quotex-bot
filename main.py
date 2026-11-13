@@ -58,6 +58,17 @@ class Bot:
         self.pause_event.set()
         self.stop_event = threading.Event()
         self._pre_scan_candidate = None
+        
+        # --- Force clear stuck signals from DB on startup ---
+        if self.tracker.pending:
+            log("clearing_stuck_signals", count=len(self.tracker.pending))
+            for s in list(self.tracker.pending):
+                self.tracker.close(s, "VOID")
+                
+        # মেমরি-ভিত্তিক টাইমার (৩ মিনিট গ্যাপ নিশ্চিত করতে)
+        self.last_signal_time = 0
+        self.last_result_time = 0
+        
         os.makedirs(cfg.charts_dir, exist_ok=True)
         self.strategy = None
         self._build_strategy()
@@ -184,12 +195,11 @@ class Bot:
             return
         if self.tracker.pending:
             return
-        # গ্লোবাল কুলডাউন চেক (৩ মিনিট)
-        last_res = self.risk.s.get("last_result_time")
-        if last_res:
-            if (now - datetime.fromisoformat(last_res)) <= timedelta(minutes=3):
-                return
-                
+        
+        # মেমরি-ভিত্তিক কুলডাউন (সিগন্যাল বা রেজাল্টের ৩ মিনিট পর)
+        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
+            return
+            
         peek = getattr(self.source, "get_candles_peek", None)
         if peek is None: return
         bad = fx.bad_assets(self)
@@ -243,34 +253,36 @@ class Bot:
             try:
                 # ১০০% রেজাল্ট নিশ্চিত করতে বর্তমান ক্লোজড ক্যান্ডেল নেওয়া হচ্ছে
                 m5 = self.source.get_candles(sig.asset, cfg.entry_tf_seconds, 10, now)
+                if len(m5) == 0: continue
+                
+                exit_price = float(m5["close"].iloc[-1])
+                outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
+                pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
+                self.risk.record_result(sig.asset, outcome, pnl, now)
+                self.tracker.close(sig, outcome, exit_price, pnl)
+                
+                # রেজাল্ট টাইম সেভ করা (৩ মিনিট গ্যাপ নিশ্চিত করতে)
+                self.last_result_time = time.time()
+                
+                log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
+                self._send_result(sig, m5, outcome, pnl)
+                
+                created = False
+                if outcome == "LOSS":
+                    before = len(self.tracker.pending)
+                    self._try_mtg(sig, now)
+                    created = len(self.tracker.pending) > before
+                    if not created and cfg.mtg_enabled and sig.step < cfg.mtg_max_steps:
+                        self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset}")
+                if not created:
+                    fx.maybe_history_report(self)
+                    
+                if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
+                    if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
+                        self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
+                        self.send_daily_summary(now)
             except Exception as e:
-                log("resolve_fetch_failed", id=sig.id, error=str(e)[:200])
-                continue
-                
-            if len(m5) == 0: continue
-                
-            exit_price = float(m5["close"].iloc[-1])
-            outcome = outcome_for(sig.direction, sig.entry_price, exit_price)
-            pnl = pnl_for(outcome, sig.stake, sig.payout_pct)
-            self.risk.record_result(sig.asset, outcome, pnl, now)
-            self.tracker.close(sig, outcome, exit_price, pnl)
-            log("result", id=sig.id, asset=sig.asset, outcome=outcome, pnl=pnl, step=sig.step)
-            self._send_result(sig, m5, outcome, pnl)
-            
-            created = False
-            if outcome == "LOSS":
-                before = len(self.tracker.pending)
-                self._try_mtg(sig, now)
-                created = len(self.tracker.pending) > before
-                if not created and cfg.mtg_enabled and sig.step < cfg.mtg_max_steps:
-                    self.tg.message(f"⏭ <b>MTG1 skipped</b> · {sig.asset}")
-            if not created:
-                fx.maybe_history_report(self)
-                
-            if self.risk.s["signals_today"] >= self.cfg.max_signals_per_day:
-                if self.store.kv_get("last_daily_summary") != now.strftime("%Y-%m-%d"):
-                    self.tg.message(f"🛑 <b>Daily Limit Reached!</b> Bot has sent {self.cfg.max_signals_per_day} signals for today.")
-                    self.send_daily_summary(now)
+                log("resolve_error", id=sig.id, error=str(e)[:200])
 
     def _try_mtg(self, sig, now):
         cfg = self.cfg
@@ -308,13 +320,11 @@ class Bot:
         cfg = self.cfg
         if self.source is None: return
         
-        # গ্লোবাল ৩ মিনিট কুলডাউন
-        last_res = self.risk.s.get("last_result_time")
-        if last_res:
-            if (now - datetime.fromisoformat(last_res)) <= timedelta(minutes=3):
-                self.diag["waiting_gap"] += 1
-                return
-                
+        # মেমরি-ভিত্তিক ৩ মিনিট গ্যাপ
+        if (time.time() - self.last_signal_time) < 180 or (time.time() - self.last_result_time) < 180:
+            self.diag["waiting_gap"] += 1
+            return
+            
         if self.tracker.pending:
             for sig in list(self.tracker.pending):
                 exp = pd.Timestamp(sig.expiry_time)
@@ -351,6 +361,10 @@ class Bot:
         self.tracker.add(sig)
         self.risk.register_signal(d.asset, d.decision, now)
         sig.executed = self.executor.execute(sig)
+        
+        # সিগন্যাল টাইম সেভ করা
+        self.last_signal_time = time.time()
+        
         self._send_signal(sig, m5)
         log("signal", id=sig.id, asset=d.asset, direction=d.decision, score=d.score, stake=stake)
 
