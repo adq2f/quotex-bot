@@ -3,7 +3,7 @@
     const fmtMoney = (v) => v == null ? '—' : (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const cls = (v) => v > 0 ? 'text-success' : v < 0 ? 'text-danger' : '';
-    const STRAT = {60: 'Quick M1 (EMA+RSI+MACD+BB+Stoch)'};
+    const STRAT = {60: 'Quick Multi-Strategy (1M)', 300: 'Rulebook (SMC 5M)'};
     const label = (tf) => STRAT[tf] || 'Rulebook (SMC)';
 
     function pill(st) {
@@ -78,16 +78,22 @@
         $('btn-refresh').onclick = () => { refresh(); loadHistory(); };
         $('sel-timeframe').addEventListener('change', () => { $('lbl-strategy').textContent = label(+$('sel-timeframe').value); });
         $('sw-mtg').addEventListener('change', async () => { await save({ mtg_enabled: $('sw-mtg').checked }); refresh(); });
+        
         fetch('/api/settings', { credentials: 'same-origin' }).then(r => r.json()).then(s => {
             $('sw-mtg').checked = !!s.mtg_enabled;
             if (s.web_timeframe_seconds) { $('sel-timeframe').value = String(s.web_timeframe_seconds); $('lbl-strategy').textContent = label(s.web_timeframe_seconds); }
+            if (s.max_signals_per_day) { $('inp-max-sig').value = s.max_signals_per_day; }
         }).catch(() => {});
+
         $('btn-apply-settings').onclick = async () => {
             const el = $('settings-status'); el.textContent = 'Applying…'; el.className = 'small text-secondary';
             try {
-                const r = await save({ web_timeframe_seconds: parseInt($('sel-timeframe').value, 10) });
+                const r = await save({ 
+                    web_timeframe_seconds: parseInt($('sel-timeframe').value, 10),
+                    max_signals_per_day: parseInt($('inp-max-sig').value, 10)
+                });
                 const j = await r.json();
-                el.textContent = r.ok ? `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds / 60}min` : (j.error || 'Failed');
+                el.textContent = r.ok ? `Applied: ${j.applied.strategy_mode} @ ${j.applied.web_timeframe_seconds / 60}min | Max: ${j.applied.max_signals_per_day}` : (j.error || 'Failed');
                 el.className = 'small ' + (r.ok ? 'text-success' : 'text-danger');
             } catch (e) { el.textContent = 'Network error'; el.className = 'small text-danger'; }
             refresh();
