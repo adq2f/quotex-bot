@@ -1,4 +1,4 @@
-"""webapp.py  --  Flask: auth + dashboard + bot control + settings (timeframe, MTG1) + history + diagnostics."""
+"""webapp.py  --  Flask: auth + dashboard + bot control + settings (timeframe, MTG1, max signals) + history + diagnostics."""
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -110,8 +110,10 @@ def create_app(bot, controller: BotController) -> Flask:
     @_auth_required
     def api_get_settings():
         tf = int(store.get_setting("web_timeframe_seconds", bot.cfg.web_timeframe_seconds) or 300)
+        max_sig = int(store.get_setting("max_signals_per_day", bot.cfg.max_signals_per_day))
         return jsonify({"web_timeframe_seconds": tf, "strategy_mode": strategy_for_timeframe(tf),
-                        "mtg_enabled": bool(store.get_setting("mtg_enabled", bot.cfg.mtg_enabled))})
+                        "mtg_enabled": bool(store.get_setting("mtg_enabled", bot.cfg.mtg_enabled)),
+                        "max_signals_per_day": max_sig})
 
     @app.post("/api/settings")
     @_auth_required
@@ -124,10 +126,16 @@ def create_app(bot, controller: BotController) -> Flask:
             store.set_setting("web_timeframe_seconds", tf)
         if "mtg_enabled" in data:
             store.set_setting("mtg_enabled", bool(data["mtg_enabled"]))
+        if "max_signals_per_day" in data:
+            ms = int(data["max_signals_per_day"])
+            if ms < 1 or ms > 100:
+                return jsonify({"error": "invalid max_signals_per_day"}), 400
+            store.set_setting("max_signals_per_day", ms)
+            
         bot._build_strategy()
         return jsonify({"ok": True, "applied": {
             "web_timeframe_seconds": bot.cfg.entry_tf_seconds, "strategy_mode": bot.cfg.strategy_mode,
-            "mtg_enabled": bot.cfg.mtg_enabled}})
+            "mtg_enabled": bot.cfg.mtg_enabled, "max_signals_per_day": bot.cfg.max_signals_per_day}})
 
     @app.get("/api/history")
     @_auth_required
