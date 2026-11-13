@@ -26,6 +26,7 @@ def _list(name: str, default: str = "") -> List[str]:
     raw = os.getenv(name, default)
     return [x.strip() for x in raw.split(",") if x.strip()]
 
+# OTC পেয়ার বাদ দেওয়া হয়েছে, শুধু রিয়েল মার্কেটের পেয়ার রাখা হয়েছে
 DEFAULT_WHITELIST = (
     "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,XAUUSD"
 )
@@ -47,7 +48,7 @@ class Settings:
     bias_tf_seconds: Tuple[int, int] = (14400, 3600)
     expiry_candles: int = min(max(_i("EXPIRY_CANDLES", 1), 1), 2)
     
-    # সিগন্যাল ১২০ সেকেন্ড পর্যন্ত ভ্যালিড থাকবে
+    # সিগন্যাল বাতিল (Stale) হওয়া বন্ধ করতে ১২০ সেকেন্ড করা হলো
     signal_max_age_seconds: int = min(max(_i("SIGNAL_MAX_AGE_SECONDS", 120), 1), 300)
 
     strategy_mode: str = os.getenv("STRATEGY_MODE", "quick").lower()
@@ -122,9 +123,12 @@ class Settings:
     sweep_min_wick_ratio: float = _f("SWEEP_MIN_WICK_RATIO", 0.30)
     impulse_body_mult: float = _f("IMPULSE_BODY_MULT", 1.2)
     three_line_strike_min_move_pct: float = _f("TLS_MIN_MOVE_PCT", 5.0)
+    
+    # ১ মিনিটে দ্রুত ডাটা পেতে ২০ ক্যান্ডেল করা হলো
     min_entry_candles: int = 20
     min_bias_candles: int = 100
     stake_min: float = 1.0
+    
     news_calendar_url: str = os.getenv("NEWS_CALENDAR_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
     news_enabled: bool = _b("NEWS_ENABLED", True)
     news_fail_policy: str = os.getenv("NEWS_FAIL_POLICY", "block").lower()
@@ -157,12 +161,13 @@ def validate() -> List[str]:
     if settings.data_source not in ("biquote", "csv", "synthetic", "quotex"): warnings.append(f"DATA_SOURCE='{settings.data_source}' not supported.")
     return warnings
 
+# সব টাইমফ্রেমেই Universal Best Strategy (quick) চলবে
 TIMEFRAME_STRATEGY_MAP = {
     60:   "quick",
-    300:  "rulebook",
-    900:  "rulebook",
-    3600: "rulebook",
+    300:  "quick",
+    900:  "quick",
+    3600: "quick",
 }
 
 def strategy_for_timeframe(tf_seconds: int) -> str:
-    return TIMEFRAME_STRATEGY_MAP.get(int(tf_seconds), "rulebook")
+    return TIMEFRAME_STRATEGY_MAP.get(int(tf_seconds), "quick")
